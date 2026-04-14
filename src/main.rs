@@ -6637,4 +6637,91 @@ fn handle_codex_review(args: Value) -> Result<Value, String> {
 //   handle_codex_exec: 5487-5530
 //   handle_codex_review: 5532-5569
 //
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_kill_process_tree_spawns_and_kills() {
+        // Spawn a long-running child process (ping -n 9999 localhost on Windows)
+        let child = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 9999 127.0.0.1 > nul"])
+            .spawn()
+            .expect("Failed to spawn test child process");
+
+        let root_pid = child.id();
+
+        // Give it a moment to start
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Verify it's alive
+        let alive_check = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", root_pid), "/NH"])
+            .output()
+            .expect("tasklist failed");
+        let alive_text = String::from_utf8_lossy(&alive_check.stdout);
+        assert!(
+            alive_text.contains(&root_pid.to_string()),
+            "Child process {} should be alive before cancel. Output: {}",
+            root_pid,
+            alive_text
+        );
+
+        // Kill the process tree
+        let killed = kill_process_tree(root_pid);
+
+        // Give OS time to reap
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Verify root is dead
+        let dead_check = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", root_pid), "/NH"])
+            .output()
+            .expect("tasklist failed");
+        let dead_text = String::from_utf8_lossy(&dead_check.stdout);
+        // tasklist returns "INFO: No tasks are running which match the specified criteria." when PID is gone
+        let still_alive = dead_text.contains("cmd.exe") || dead_text.contains("PING");
+        assert!(
+            !still_alive,
+            "Child process {} should be dead after kill_process_tree. killed={:?} Output: {}",
+            root_pid,
+            killed,
+            dead_text
+        );
+
+        // killed should contain at least the root
+        assert!(
+            !killed.is_empty(),
+            "kill_process_tree should report at least one killed PID, got: {:?}",
+            killed
+        );
+    }
+
+    #[test]
+    fn test_compute_fingerprint_deterministic() {
+        let fp1 = compute_task_fingerprint(&Backend::ClaudeCode, "test prompt", Some("C:\\test"));
+        let fp2 = compute_task_fingerprint(&Backend::ClaudeCode, "test prompt", Some("C:\\test"));
+        assert_eq!(fp1, fp2, "Same inputs should produce same fingerprint");
+
+        let fp3 = compute_task_fingerprint(&Backend::Gpt, "test prompt", Some("C:\\test"));
+        assert_ne!(fp1, fp3, "Different backend should produce different fingerprint");
+
+        let fp4 = compute_task_fingerprint(&Backend::ClaudeCode, "different prompt", Some("C:\\test"));
+        assert_ne!(fp1, fp4, "Different prompt should produce different fingerprint");
+    }
+
+    #[test]
+    fn test_compute_fingerprint_truncates_prompt() {
+        let short = "a".repeat(200);
+        let long = format!("{}extra_stuff", "a".repeat(200));
+        let fp_short = compute_task_fingerprint(&Backend::ClaudeCode, &short, None);
+        let fp_long = compute_task_fingerprint(&Backend::ClaudeCode, &long, None);
+        assert_eq!(fp_short, fp_long, "Fingerprint should only use first 200 chars of prompt");
+    }
+}
 // === END FILE NAVIGATION ===
