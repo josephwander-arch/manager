@@ -351,6 +351,10 @@ struct Task {
     pub child_pid: Option<u32>,
     #[serde(default)]
     pub watchdog_observations: Vec<String>,
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub superseded_by: Option<String>,
 }
 
 /// Item 16: Task routing intelligence — recommends the best backend for a prompt.
@@ -888,6 +892,8 @@ impl Server {
             continuation_of: None,
             child_pid: None,
             watchdog_observations: Vec::new(),
+            fingerprint: None,
+            superseded_by: None,
         };
 
         // Note on original task
@@ -1157,6 +1163,8 @@ fn spawn_on_complete(
         continuation_of: None,
         child_pid: None,
         watchdog_observations: Vec::new(),
+        fingerprint: None,
+        superseded_by: None,
     };
 
     info!("on_complete: spawning follow-up task {} from completed task {}", follow_up.id, parent_id);
@@ -1926,6 +1934,47 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
         .ok_or("Missing 'prompt' parameter")?
         .to_string();
 
+    // v1.2.3: Fingerprint dedup check
+    let allow_duplicate = params.get("allow_duplicate").and_then(|v| v.as_bool()).unwrap_or(false);
+    let working_dir_for_fp = params.get("working_dir").and_then(|v| v.as_str());
+    let fp = compute_task_fingerprint(&backend, &raw_prompt, working_dir_for_fp);
+
+    if !allow_duplicate {
+        let store = server.runtime.block_on(server.tasks.read());
+        let match_task = store.values().find(|t| {
+            t.fingerprint.as_deref() == Some(fp.as_str())
+                && matches!(t.status, TaskStatus::Running | TaskStatus::Queued)
+                && t.superseded_by.is_none()
+        });
+        if let Some(existing) = match_task {
+            let last_act = existing.last_activity.unwrap_or(existing.created_at);
+            let stale_secs = (Utc::now() - last_act).num_seconds();
+            if stale_secs <= 120 {
+                // Active duplicate — reject
+                return Ok(json!({
+                    "status": "duplicate",
+                    "existing_task_id": existing.id,
+                    "message": format!("Duplicate of active task {} (last activity {}s ago). Use allow_duplicate: true to override.", existing.id, stale_secs),
+                }));
+            }
+            // Stalled duplicate — allow, mark old as superseded (need write lock)
+            let old_id = existing.id.clone();
+            drop(store);
+            let mut wstore = server.runtime.block_on(server.tasks.write());
+            if let Some(old_task) = wstore.get_mut(&old_id) {
+                // Will be set to superseded_by after new task is created below
+                old_task.watchdog_observations.push(format!(
+                    "[{}] Stalled {}s — superseded by new submission", Utc::now().format("%H:%M:%S"), stale_secs
+                ));
+                Server::persist_task(old_task);
+            }
+            drop(wstore);
+            // Continue to create new task; we'll set superseded_by after task_id is generated
+        } else {
+            drop(store);
+        }
+    }
+
     // CPC behavioral injection — prepend delegation rules to every task
     // Include active loaf context if one exists
     let loaf_context = find_active_loaf().map(|(id, loaf)| {
@@ -2011,6 +2060,8 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
         continuation_of: None,
         child_pid: None,
         watchdog_observations: Vec::new(),
+        fingerprint: Some(fp.clone()),
+        superseded_by: None,
     };
 
     // Store task
@@ -2019,6 +2070,23 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
 
     server.runtime.block_on(async {
         let mut store = tasks.write().await;
+        // v1.2.3: Link stalled duplicate if one was detected
+        if !allow_duplicate {
+            let stalled_id: Option<String> = store.values()
+                .find(|t| {
+                    t.fingerprint.as_deref() == Some(fp.as_str())
+                        && t.id != task_id
+                        && matches!(t.status, TaskStatus::Running | TaskStatus::Queued)
+                        && t.superseded_by.is_none()
+                })
+                .map(|t| t.id.clone());
+            if let Some(old_id) = stalled_id {
+                if let Some(old_task) = store.get_mut(&old_id) {
+                    old_task.superseded_by = Some(task_id.clone());
+                    Server::persist_task(old_task);
+                }
+            }
+        }
         store.insert(task_id.clone(), task.clone());
     });
     Server::persist_task(&task);
@@ -2405,6 +2473,10 @@ fn handle_list_tasks(server: &Server, params: Value) -> Result<Value, String> {
     let backend_filter = params.get("backend")
         .and_then(|v| v.as_str());
 
+    let include_stalled = params.get("include_stalled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     let limit = params.get("limit")
         .and_then(|v| v.as_u64())
         .unwrap_or(20) as usize;
@@ -2418,6 +2490,13 @@ fn handle_list_tasks(server: &Server, params: Value) -> Result<Value, String> {
             }
             if let Some(bf) = backend_filter {
                 if t.backend.to_string() != bf { return false; }
+            }
+            // v1.2.3: include_stalled filter — when true, only show stalled tasks
+            if include_stalled {
+                let is_stalled = matches!(t.status, TaskStatus::Running | TaskStatus::Queued)
+                    && t.last_activity.map_or(true, |la| (Utc::now() - la).num_seconds() > 120)
+                    && t.superseded_by.is_none();
+                if !is_stalled { return false; }
             }
             true
         })
@@ -2638,6 +2717,18 @@ fn read_active_loaf_summary() -> String {
         }
         None => "none".to_string(),
     }
+}
+
+/// v1.2.3: Compute a dedup fingerprint from (backend, prompt[:200], working_dir).
+fn compute_task_fingerprint(backend: &Backend, raw_prompt: &str, working_dir: Option<&str>) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    backend.to_string().hash(&mut h);
+    let prompt_prefix: String = raw_prompt.chars().take(200).collect();
+    prompt_prefix.hash(&mut h);
+    working_dir.unwrap_or("").hash(&mut h);
+    format!("{:016x}", h.finish())
 }
 
 /// v1.2.3: status_bar — one-liner summary of manager, breadcrumb, and loaf state.
@@ -3163,6 +3254,8 @@ fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
         continuation_of: None,
         child_pid: None,
         watchdog_observations: Vec::new(),
+        fingerprint: None,
+        superseded_by: None,
     };
     rt.block_on(async { server.tasks.write().await.insert(wf_id.clone(), wf_task); });
 
@@ -4504,6 +4597,8 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
         continuation_of: None,
         child_pid: None,
         watchdog_observations: Vec::new(),
+        fingerprint: None,
+        superseded_by: None,
     };
 
     // Store and persist
@@ -4644,6 +4739,10 @@ fn get_tools_list() -> Value {
                             "type": "integer",
                             "description": "Estimated duration in seconds (informational only, no enforcement). Surfaced in task_poll status_bar."
                         },
+                        "allow_duplicate": {
+                            "type": "boolean",
+                            "description": "If true, skip fingerprint dedup check. Default: false."
+                        },
                         "on_complete": {
                             "type": "string",
                             "description": "Prompt for a follow-up task to auto-submit when this task completes successfully. The new task inherits backend, working_dir, and model."
@@ -4712,6 +4811,10 @@ fn get_tools_list() -> Value {
                         "limit": {
                             "type": "integer",
                             "description": "Max tasks to return (default 20)"
+                        },
+                        "include_stalled": {
+                            "type": "boolean",
+                            "description": "If true, only return stalled tasks (running/queued with no activity for 120s+ and not superseded). Default: false."
                         }
                     }
                 }
@@ -5331,6 +5434,8 @@ async fn dash_post_task(State(st): State<DashboardState>, Json(body): Json<Value
         continuation_of: None,
         child_pid: None,
         watchdog_observations: Vec::new(),
+        fingerprint: None,
+        superseded_by: None,
     };
     { let mut store = st.tasks.write().await; store.insert(task_id.clone(), task.clone()); }
     Server::persist_task(&task);
@@ -6093,6 +6198,8 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
             continuation_of: None,
             child_pid: None,
             watchdog_observations: Vec::new(),
+            fingerprint: None,
+            superseded_by: None,
         });
     }
 
@@ -6198,6 +6305,8 @@ fn handle_send_to_session(server: &Server, args: Value) -> Result<Value, String>
             continuation_of: None,
             child_pid: None,
             watchdog_observations: Vec::new(),
+            fingerprint: None,
+            superseded_by: None,
         });
     }
 
