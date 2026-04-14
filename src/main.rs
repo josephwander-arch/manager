@@ -2640,6 +2640,12 @@ fn read_active_loaf_summary() -> String {
     }
 }
 
+/// v1.2.3: status_bar — one-liner summary of manager, breadcrumb, and loaf state.
+fn handle_status_bar(server: &Server, _params: Value) -> Result<Value, String> {
+    let store = server.runtime.block_on(server.tasks.read());
+    Ok(build_status_bar(&store))
+}
+
 fn handle_pause_task(server: &Server, params: Value) -> Result<Value, String> {
     let task_id = params.get("task_id")
         .and_then(|v| v.as_str())
@@ -4248,6 +4254,7 @@ fn handle_tool_call(server: &Server, tool: &str, args: Value) -> Result<Value, S
         "task_list" | "list_tasks" => handle_list_tasks(server, args),
         "task_cancel" | "cancel_task" => handle_cancel_task(server, args),
         "task_poll" => handle_task_poll(server, args),
+        "status_bar" => handle_status_bar(server, args),
         "pause_task" => handle_pause_task(server, args),
         "resume_task" => handle_resume_task(server, args),
         "configure" => handle_configure(server, args),
@@ -4721,6 +4728,14 @@ fn get_tools_list() -> Value {
                         }
                     },
                     "required": ["task_id"]
+                }
+            },
+            {
+                "name": "status_bar",
+                "description": "One-line status summary: manager (running/queued/unclaimed), breadcrumb (active op from autonomous), loaf (active project). Returns structured fields plus a formatted one-liner. Never errors — returns 'unavailable' for unreachable sources.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
                 }
             },
             {
