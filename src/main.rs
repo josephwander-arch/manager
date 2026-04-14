@@ -2151,41 +2151,10 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
     }
 
 
-    // Sync wait mode: block until task completes
-    let wait = params.get("wait").and_then(|v| v.as_bool()).unwrap_or(false);
-    if wait {
-        let timeout = params.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(300);
-        let start_wait = std::time::Instant::now();
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            let tasks_check = server.runtime.block_on(server.tasks.read());
-            if let Some(t) = tasks_check.get(&task_id) {
-                match &t.status {
-                    TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled => {
-                        return Ok(json!({
-                            "task_id": task_id,
-                            "status": t.status.to_string(),
-                            "output": t.output,
-                            "error": t.error,
-                            "steps": t.steps.len(),
-                            "input_tokens": t.input_tokens,
-                            "output_tokens": t.output_tokens,
-                            "cost_usd": t.cost_usd,
-                            "elapsed": format!("{}s", start_wait.elapsed().as_secs()),
-                        }));
-                    }
-                    _ => {}
-                }
-            }
-            drop(tasks_check);
-            if start_wait.elapsed().as_secs() > timeout {
-                return Ok(json!({
-                    "task_id": task_id,
-                    "status": "timeout",
-                    "message": format!("Still running after {}s. Poll with get_status.", timeout),
-                }));
-            }
-        }
+    // v1.2.3: wait=true blocking removed. task_submit always returns immediately.
+    // timeout_secs kept as estimated_secs for informational purposes only.
+    if let Some(est) = params.get("timeout_secs").or(params.get("estimated_secs")).and_then(|v| v.as_u64()) {
+        result["estimated_secs"] = json!(est);
     }
 
     Ok(result)
@@ -2563,6 +2532,112 @@ fn kill_process_tree(root_pid: u32) -> Vec<u32> {
         }
     }
     killed
+}
+
+/// v1.2.3: task_poll — returns tasks completed since a timestamp, plus still-running tasks and status_bar.
+fn handle_task_poll(server: &Server, params: Value) -> Result<Value, String> {
+    let since_str = params.get("since").and_then(|v| v.as_str());
+    let since: DateTime<Utc> = if let Some(s) = since_str {
+        DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now() - chrono::Duration::hours(1))
+    } else {
+        // Default: 1 hour ago
+        Utc::now() - chrono::Duration::hours(1)
+    };
+
+    let store = server.runtime.block_on(server.tasks.read());
+
+    let completed_since: Vec<Value> = store.values()
+        .filter(|t| {
+            matches!(t.status, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled)
+                && t.completed_at.map_or(false, |c| c > since)
+        })
+        .map(|t| json!({
+            "task_id": t.id,
+            "backend": t.backend.to_string(),
+            "status": t.status.to_string(),
+            "prompt_preview": safe_truncate(&t.prompt, 80),
+            "completed_at": t.completed_at.map(|c| c.to_rfc3339()),
+            "error": t.error,
+        }))
+        .collect();
+
+    let still_running: Vec<Value> = store.values()
+        .filter(|t| matches!(t.status, TaskStatus::Running | TaskStatus::Queued))
+        .map(|t| json!({
+            "task_id": t.id,
+            "backend": t.backend.to_string(),
+            "status": t.status.to_string(),
+            "prompt_preview": safe_truncate(&t.prompt, 80),
+            "elapsed": t.started_at.map(|s| format!("{}s", (Utc::now() - s).num_seconds())),
+            "child_pid": t.child_pid,
+        }))
+        .collect();
+
+    let status_bar = build_status_bar(&store);
+
+    Ok(json!({
+        "completed_since": completed_since,
+        "still_running": still_running,
+        "status_bar": status_bar,
+        "polled_at": Utc::now().to_rfc3339(),
+    }))
+}
+
+/// Build a status_bar summary from task state + external state files.
+fn build_status_bar(store: &HashMap<String, Task>) -> Value {
+    let running = store.values().filter(|t| t.status == TaskStatus::Running).count();
+    let queued = store.values().filter(|t| t.status == TaskStatus::Queued).count();
+    let unclaimed = 0usize; // reserved for future queue system
+
+    let manager_line = format!("{} running, {} queued, {} unclaimed", running, queued, unclaimed);
+
+    // Query autonomous breadcrumb state
+    let autonomous_data = std::env::var("AUTONOMOUS_DATA_DIR").unwrap_or_else(|_| {
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        format!(r"{}\autonomous", local)
+    });
+    let breadcrumb_line = read_state_file(&format!(r"{}\logs\breadcrumb.jsonl", autonomous_data))
+        .unwrap_or_else(|| "unavailable".to_string());
+
+    // Query local server state
+    let loaf_line = read_active_loaf_summary();
+
+    let formatted = format!("mgr: {} | bc: {} | loaf: {}", manager_line, breadcrumb_line, loaf_line);
+
+    json!({
+        "manager": manager_line,
+        "breadcrumb": breadcrumb_line,
+        "loaf": loaf_line,
+        "formatted": formatted,
+    })
+}
+
+/// Read last line of a state file to get latest status. Returns None if file unreadable.
+fn read_state_file(path: &str) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let last_line = content.lines().last()?;
+    // Try to extract a summary from JSONL
+    if let Ok(v) = serde_json::from_str::<Value>(last_line) {
+        let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+        let step = v.get("current_step").and_then(|s| s.as_u64()).unwrap_or(0);
+        let total = v.get("total_steps").and_then(|s| s.as_u64()).unwrap_or(0);
+        Some(format!("{} ({}/{})", name, step, total))
+    } else {
+        Some(safe_truncate(last_line, 60))
+    }
+}
+
+/// Read active loaf summary for status_bar
+fn read_active_loaf_summary() -> String {
+    match find_active_loaf() {
+        Some((id, loaf)) => {
+            let goal = loaf.get("goal").and_then(|g| g.as_str()).unwrap_or("?");
+            format!("{}: {}", id, safe_truncate(goal, 40))
+        }
+        None => "none".to_string(),
+    }
 }
 
 fn handle_pause_task(server: &Server, params: Value) -> Result<Value, String> {
@@ -4172,6 +4247,7 @@ fn handle_tool_call(server: &Server, tool: &str, args: Value) -> Result<Value, S
         "task_output" | "get_output" => handle_get_output(server, args),
         "task_list" | "list_tasks" => handle_list_tasks(server, args),
         "task_cancel" | "cancel_task" => handle_cancel_task(server, args),
+        "task_poll" => handle_task_poll(server, args),
         "pause_task" => handle_pause_task(server, args),
         "resume_task" => handle_resume_task(server, args),
         "configure" => handle_configure(server, args),
@@ -4557,13 +4633,9 @@ fn get_tools_list() -> Value {
                             "type": "boolean",
                             "description": "If true and no backend specified, automatically select the best backend based on prompt analysis, history, and learned patterns."
                         },
-                        "wait": {
-                            "type": "boolean",
-                            "description": "If true, block until task completes and return output directly. Good for quick tasks. Default: false."
-                        },
-                        "timeout_secs": {
+                        "estimated_secs": {
                             "type": "integer",
-                            "description": "Max seconds to wait when wait=true (default: 300)."
+                            "description": "Estimated duration in seconds (informational only, no enforcement). Surfaced in task_poll status_bar."
                         },
                         "on_complete": {
                             "type": "string",
@@ -4649,6 +4721,19 @@ fn get_tools_list() -> Value {
                         }
                     },
                     "required": ["task_id"]
+                }
+            },
+            {
+                "name": "task_poll",
+                "description": "Poll for task completions and running status. Returns tasks completed since a timestamp, still-running tasks, and a status_bar summary. Use instead of blocking wait.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "since": {
+                            "type": "string",
+                            "description": "RFC3339 timestamp. Returns tasks completed after this time. Defaults to 1 hour ago."
+                        }
+                    }
                 }
             },
             {
