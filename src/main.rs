@@ -2494,9 +2494,21 @@ fn handle_cancel_task(server: &Server, params: Value) -> Result<Value, String> {
         return Err(format!("Task '{}' is already {} - cannot cancel", task_id, task.status));
     }
 
+    // v1.2.3: Kill the child process tree before marking cancelled
+    let killed_tree = if let Some(root_pid) = task.child_pid {
+        kill_process_tree(root_pid)
+    } else {
+        vec![]
+    };
+
     task.status = TaskStatus::Cancelled;
     task.completed_at = Some(Utc::now());
     task.error = Some("Cancelled by user".into());
+    if !killed_tree.is_empty() {
+        task.watchdog_observations.push(format!(
+            "[{}] Cancel killed process tree: {:?}", Utc::now().format("%H:%M:%S"), killed_tree
+        ));
+    }
     Server::flag_extraction(task);
     // Item 18: no retry for cancelled tasks
     Server::persist_task(task);
@@ -2505,8 +2517,52 @@ fn handle_cancel_task(server: &Server, params: Value) -> Result<Value, String> {
     Ok(json!({
         "task_id": task_id,
         "status": "cancelled",
-        "message": "Task marked cancelled. Background process may still be running."
+        "killed_tree": killed_tree,
+        "message": if killed_tree.is_empty() {
+            "Task cancelled (no child process to kill).".to_string()
+        } else {
+            format!("Task cancelled. Killed {} processes.", killed_tree.len())
+        }
     }))
+}
+
+/// Walk the process tree rooted at `root_pid`, kill descendants bottom-up, then kill root.
+/// Returns list of PIDs that were successfully terminated.
+fn kill_process_tree(root_pid: u32) -> Vec<u32> {
+    use sysinfo::{System, Pid, ProcessesToUpdate};
+
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+
+    // Build parent→children map
+    let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (pid, proc) in sys.processes() {
+        if let Some(parent) = proc.parent() {
+            children_map.entry(parent.as_u32()).or_default().push(pid.as_u32());
+        }
+    }
+
+    // BFS to collect all descendants
+    let mut to_kill = Vec::new();
+    let mut queue = vec![root_pid];
+    while let Some(pid) = queue.pop() {
+        to_kill.push(pid);
+        if let Some(kids) = children_map.get(&pid) {
+            queue.extend(kids.iter());
+        }
+    }
+
+    // Kill in reverse order (descendants first, root last)
+    to_kill.reverse();
+    let mut killed = Vec::new();
+    for pid in &to_kill {
+        if let Some(proc) = sys.process(Pid::from_u32(*pid)) {
+            if proc.kill() {
+                killed.push(*pid);
+            }
+        }
+    }
+    killed
 }
 
 fn handle_pause_task(server: &Server, params: Value) -> Result<Value, String> {
