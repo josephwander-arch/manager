@@ -2,6 +2,11 @@
 
 All notable changes to the Manager MCP Server are documented here.
 
+## [Unreleased]
+
+### Added
+- **`cpc-paths` dependency** (v0.1.0) — portable path discovery library added as a git dep pinned to tag v0.1.0. No behavior change. Groundwork for future health/diagnostic integration.
+
 ## [1.2.6] - 2026-04-15 — Session Notification Hooks
 
 ### Added
