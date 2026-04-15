@@ -4,7 +4,7 @@
 //! Submit Ã¢â€ â€™ Poll Ã¢â€ â€™ Retrieve pattern for long-running tasks
 //!
 //! Tools: submit_task, get_status, get_output, list_tasks, cancel_task, configure, retry_task
-// NAV: TOC at line 5572 | 97 fn | 16 struct | 2026-04-08
+// NAV: TOC at line 6755 | 107 fn | 16 struct | 2026-04-14
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,8 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+mod analyzer;
 
 // Dashboard
 use axum::{extract::{Path as AxumPath, Query, State}, http::StatusCode, response::IntoResponse, routing::{get, post}, Json, Router};
@@ -4195,6 +4197,19 @@ fn handle_get_analytics(server: &Server, args: Value) -> Result<Value, String> {
 }
 
 // ============================================================================
+// §12a: Nightly Analyzer
+// ============================================================================
+
+fn handle_run_analyzer(args: Value) -> Result<Value, String> {
+    let volumes = args.get("volumes_path").and_then(|v| v.as_str())
+        .unwrap_or(r"C:\My Drive\Volumes").to_string();
+    let history = args.get("history_path").and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("{}\\task_history.json", history_dir()));
+    analyzer::run_analyzer(&volumes, &history)
+}
+
+// ============================================================================
 // §12: Specialist Role Prompts
 // ============================================================================
 
@@ -4429,9 +4444,11 @@ fn handle_tool_call(server: &Server, tool: &str, args: Value) -> Result<Value, S
         "session_list" | "list_sessions" => handle_list_sessions(server, args),
         "session_destroy" | "destroy_session" => handle_session_destroy(server, args),
         "get_analytics" => handle_get_analytics(server, args),
+        "run_analyzer" => handle_run_analyzer(args),
         "role_list" | "list_roles" => handle_role_list(args),
         "role_create" | "create_role" => handle_role_create(args),
         "role_delete" | "delete_role" => handle_role_delete(args),
+        "notify" => Ok(handle_notify(args)),
         _ => Err(format!("Unknown tool: {}", tool)),
     }
 }
@@ -4742,6 +4759,105 @@ fn handle_route_task(args: Value) -> Result<Value, String> {
         "reasoning": rec.reasoning,
         "alternatives": rec.alternatives,
     }))
+}
+
+// ============================================================================
+// Phase C fix3: Notify — Windows toast notification
+// ============================================================================
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+fn handle_notify(args: Value) -> Value {
+    let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let icon = args.get("icon").and_then(|v| v.as_str()).unwrap_or("info");
+    let duration_ms = args.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(5000).max(1);
+
+    if title.is_empty() || body.is_empty() {
+        return json!({"error": "Both title and body are required"});
+    }
+    if !matches!(icon, "info" | "warning" | "error") {
+        return json!({"error": "icon must be one of: info, warning, error"});
+    }
+
+    let display_title = match icon {
+        "warning" => format!("[Warning] {}", title),
+        "error" => format!("[Error] {}", title),
+        _ => format!("[Info] {}", title),
+    };
+    let toast_duration = if duration_ms > 7_000 { "long" } else { "short" };
+
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+if (Get-Command New-BurntToastNotification -ErrorAction SilentlyContinue) {
+    New-BurntToastNotification -Text $env:MCP_NOTIFY_TITLE, $env:MCP_NOTIFY_BODY -Silent | Out-Null
+    Write-Output 'burnttoast'
+    return
+}
+Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null
+$titleEscaped = [System.Security.SecurityElement]::Escape($env:MCP_NOTIFY_TITLE)
+$bodyEscaped = [System.Security.SecurityElement]::Escape($env:MCP_NOTIFY_BODY)
+$toastDuration = if ([int]$env:MCP_NOTIFY_DURATION_MS -gt 7000) { 'long' } else { 'short' }
+$xml = @"
+<toast duration="$toastDuration">
+  <visual>
+    <binding template="ToastGeneric">
+      <text>$titleEscaped</text>
+      <text>$bodyEscaped</text>
+    </binding>
+  </visual>
+  <audio silent="true"/>
+</toast>
+"@
+$doc = [Windows.Data.Xml.Dom.XmlDocument]::new()
+$doc.LoadXml($xml)
+$toast = [Windows.UI.Notifications.ToastNotification]::new($doc)
+$appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+try {
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)
+} catch {
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier().Show($toast)
+}
+Write-Output 'winrt'
+"#;
+
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-Command", script])
+        .env("MCP_NOTIFY_TITLE", &display_title)
+        .env("MCP_NOTIFY_BODY", &body)
+        .env("MCP_NOTIFY_DURATION_MS", duration_ms.to_string());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    match cmd.output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let backend = stdout.lines().last().unwrap_or("powershell").trim();
+            if output.status.success() {
+                json!({
+                    "success": true,
+                    "backend": backend,
+                    "title": display_title,
+                    "body": body,
+                    "icon": icon,
+                    "duration_ms": duration_ms,
+                    "toast_duration": toast_duration,
+                    "silent": true
+                })
+            } else {
+                json!({"error": stderr.trim(), "stdout": stdout.trim()})
+            }
+        }
+        Err(e) => json!({"error": format!("{}", e)}),
+    }
 }
 
 // ============================================================================
@@ -5310,6 +5426,23 @@ fn get_tools_list() -> Value {
                 }
             }),
             {
+                "name": "run_analyzer",
+                "description": "Run the nightly task performance analyzer. Computes per-backend metrics (success rate, p50/p95 duration, avg cost, retry rate), detects inflection points and promotion candidates, writes proposals to Volumes/inbox/. NEVER auto-modifies routing.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "volumes_path": {
+                            "type": "string",
+                            "description": "Override Volumes base path. Default: C:\\My Drive\\Volumes"
+                        },
+                        "history_path": {
+                            "type": "string",
+                            "description": "Override task_history.json path. Default: auto-detect from MANAGER_HISTORY_DIR"
+                        }
+                    }
+                }
+            },
+            {
                 "name": "role_list",
                 "description": "List available specialist roles (built-in + custom YAML) for task_submit. Each role injects a system prompt tailored to that specialty.",
                 "inputSchema": {
@@ -5356,6 +5489,20 @@ fn get_tools_list() -> Value {
                     "required": ["name"],
                     "properties": {
                         "name": { "type": "string", "description": "Role name to delete." }
+                    }
+                }
+            },
+            {
+                "name": "notify",
+                "description": "Show a Windows toast notification. Use for background task completion alerts, status updates, or any user-facing notification.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["title", "body"],
+                    "properties": {
+                        "title": { "type": "string", "description": "Notification title" },
+                        "body": { "type": "string", "description": "Notification body text" },
+                        "icon": { "type": "string", "enum": ["info", "warning", "error"], "default": "info", "description": "Icon type" },
+                        "duration_ms": { "type": "integer", "default": 5000, "description": "Display duration in milliseconds" }
                     }
                 }
             }
@@ -6720,242 +6867,172 @@ fn handle_codex_review(args: Value) -> Result<Value, String> {
 }
 
 // === FILE NAVIGATION ===
-// Generated: 2026-04-08T14:12:33
-// Total: 5569 lines | 97 functions | 16 structs | 12 constants
+// Generated: 2026-04-14T22:34:54
+// Total: 6752 lines | 107 functions | 16 structs | 19 constants
 //
 // IMPORTS: axum, chrono, once_cell, serde, serde_json, std, sysinfo, tokio, tower_http, tracing, uuid
 //
 // CONSTANTS:
-//   const MAX_HISTORY_ENTRIES: 29
-//   const GPT_API_URL: 30
-//   const ROLLBACK_RETENTION_HOURS: 31
-//   const DEFAULT_GPT_MODEL: 32
-//   static _GEMINI_CMD: 58
-//   static _CLAUDE_CODE_CMD: 65
-//   static _CODEX_CMD: 72
-//   static _NODE_CMD: 82
-//   static _LOAVES_ARCHIVE_DIR: 88
-//   const fn: 91
-//   const SAFETY_VALIDATION_BLOCK: 1797
-//   const SESSION_DIR: 5237
+//   const MAX_HISTORY_ENTRIES: 31
+//   const GPT_API_URL: 32
+//   const DEFAULT_GPT_MODEL: 34
+//   static _GEMINI_CMD: 60
+//   static _CLAUDE_CODE_CMD: 67
+//   static _CODEX_CMD: 74
+//   static _NODE_CMD: 84
+//   static _LOAVES_ARCHIVE_DIR: 90
+//   const fn: 93
+//   const SAFETY_VALIDATION_BLOCK: 1900
+//   const PIPE_NAME: 5800
+//   const LOCKFILE_EXCLUSIVE_LOCK: 5841
+//   const LOCKFILE_FAIL_IMMEDIATELY: 5842
+//   const PIPE_ACCESS_DUPLEX: 5948
+//   const PIPE_TYPE_BYTE: 5949
+//   const PIPE_READMODE_BYTE: 5950
+//   const PIPE_WAIT: 5951
+//   const PIPE_UNLIMITED_INSTANCES: 5952
+//   const SESSION_DIR: 6240
 //
 // STRUCTS:
-//   JsonRpcRequest: 159-165
-//   JsonRpcSuccess: 168-172
-//   JsonRpcErrorResponse: 175-179
-//   JsonRpcError: 182-185
-//   TaskStep: 278-283
-//   Task: 286-340
-//   BackendRecommendation: 344-349
-//   WorkflowStep: 352-370
-//   WorkflowTemplate: 373-391
-//   TemplateStep: 398-403
-//   ServerConfig: 409-413
-//   Server: 415-420
-//   ParallelStepResult: 2807-2814
-//   CustomRole: 3861-3866
-//   DashboardState: 4722-4725
-//   PathQuery: 5009-5011
+//   JsonRpcRequest: 162-168
+//   JsonRpcSuccess: 171-175
+//   JsonRpcErrorResponse: 178-182
+//   JsonRpcError: 185-188
+//   TaskStep: 281-286
+//   Task: 289-359
+//   BackendRecommendation: 363-368
+//   WorkflowStep: 372-390
+//   WorkflowTemplate: 394-412
+//   TemplateStep: 420-425
+//   ServerConfig: 431-435
+//   Server: 437-442
+//   ParallelStepResult: 3181-3188
+//   CustomRole: 4271-4276
+//   DashboardState: 5403-5406
+//   PathQuery: 5698-5700
 //
 // ENUMS:
-//   Backend: 193-198
-//   TaskStatus: 213-220
-//   ExtractionStatus: 237-244
-//   TrustLevel: 252-256
-//   ValidationStatus: 264-269
+//   Backend: 196-201
+//   TaskStatus: 216-223
+//   ExtractionStatus: 240-247
+//   TrustLevel: 255-259
+//   ValidationStatus: 267-272
 //
 // IMPL BLOCKS:
-//   impl std::fmt::Display for Backend: 200-209
-//   impl std::fmt::Display for TaskStatus: 222-233
-//   impl Default for ExtractionStatus: 246-248
-//   impl Default for TrustLevel: 258-260
-//   impl Default for ValidationStatus: 271-273
-//   impl Server: 422-1004
+//   impl std::fmt::Display for Backend: 203-212
+//   impl std::fmt::Display for TaskStatus: 225-236
+//   impl Default for ExtractionStatus: 249-251
+//   impl Default for TrustLevel: 261-263
+//   impl Default for ValidationStatus: 274-276
+//   impl Server: 444-1089
 //
 // FUNCTIONS:
-//   default_data_dir: 36-42
-//   tasks_dir: 97-97
-//   history_dir: 98-98
-//   gemini_cmd: 99-99
-//   claude_code_cmd: 100-100
-//   codex_cmd: 101-101
-//   workflow_patterns_dir: 102-102
-//   rollback_dir: 103-103
-//   learned_patterns_dir: 104-104
-//   node_cmd: 105-105
-//   dashboard_prefs_path: 106-106
-//   loaves_dir: 107-107
-//   loaves_archive_dir: 108-108
-//   load_terminal_visible: 111-117
-//   spawn_visible_terminal: 121-152
-//   default_max_retries: 275-275
-//   default_backend: 393-393
-//   default_trust_tmpl: 394-394
-//   default_success_rate: 395-395
-//   spawn_retry_execution: 1007-1053
-//   spawn_on_complete: 1057-1102
-//   run_gpt_task: 1108-1257 [LARGE]
-//   run_codex_task: 1261-1370 [LARGE]
-//   run_cli_task: 1371-1783 [LARGE]
-//   safe_truncate: 1790-1795
-//   ensure_safety_validation: 1799-1805
-//   extract_safety_warning: 1807-1812
-//   handle_submit_task: 1814-2107 [LARGE]
-//   handle_watch_tasks: 2111-2231 [LARGE]
-//   handle_get_status: 2233-2286 [med]
-//   handle_get_output: 2288-2320
-//   handle_list_tasks: 2322-2373 [med]
-//   handle_cancel_task: 2375-2400
-//   handle_pause_task: 2402-2422
-//   handle_resume_task: 2424-2452
-//   handle_configure: 2454-2488
-//   handle_cleanup: 2490-2518
-//   run_workflow_step: 2524-2604 [med]
-//   handle_run_workflow: 2606-2799 [LARGE]
-//   handle_run_parallel: 2816-2957 [LARGE]
-//   run_parallel_workflow: 2960-3026 [med]
-//   launch_step: 3029-3157 [LARGE]
-//   handle_decompose_task: 3163-3241 [med]
-//   handle_save_template: 3243-3265
-//   handle_list_templates: 3267-3293
-//   handle_run_template: 3295-3341
-//   handle_explain_task: 3343-3387
-//   loaf_path: 3393-3395
-//   find_active_loaf: 3398-3417
-//   handle_loaf_create: 3419-3457
-//   handle_loaf_update: 3459-3595 [LARGE]
-//   handle_loaf_status: 3597-3636
-//   handle_loaf_close: 3638-3673
-//   handle_list_sessions: 3679-3721
-//   handle_get_analytics: 3723-3799 [med]
-//   get_role_prompt: 3805-3845
-//   list_roles: 3847-3857
-//   custom_roles_dir: 3868-3872
-//   load_custom_roles: 3874-3884
-//   get_custom_role_prompt: 3886-3891
-//   handle_role_list: 3893-3908
-//   handle_role_create: 3910-3939
-//   handle_role_delete: 3941-3951
-//   save_task_artifact: 3957-3989
-//   handle_tool_call: 3995-4037
-//   handle_review_extractions: 4043-4060
-//   handle_extract_workflow: 4062-4081
-//   handle_dismiss_extraction: 4083-4091
-//   handle_rollback_task: 4093-4099
-//   handle_retry_task: 4102-4142
-//   handle_route_task: 4148-4158
-//   get_tools_list: 4164-4715 [LARGE]
-//   dash_status: 4727-4742
-//   dash_status_by_id: 4744-4757
-//   dash_health: 4759-4773
-//   dash_inbox: 4775-4794
-//   flush_entry: 4796-4803
-//   dash_get_prefs: 4805-4812
-//   dash_post_prefs: 4814-4823
-//   dash_post_task: 4825-4886 [med]
-//   dash_cancel: 4888-4904
-//   dash_knowledge: 4906-4932
-//   dash_git: 4934-4946
-//   dash_system: 4948-4971
-//   dash_history: 4973-4982
-//   volumes_base_path: 4984-4988
-//   validate_volumes_path: 4991-5006
-//   api_read_file: 5013-5033
-//   api_list_dir: 5035-5066
-//   start_dashboard: 5068-5105
-//   main: 5111-5230 [LARGE]
-//   handle_start_session: 5239-5316 [med]
-//   handle_send_to_session: 5318-5407 [med]
-//   handle_open_terminal: 5409-5464 [med]
-//   handle_gemini_direct: 5466-5485
-//   handle_codex_exec: 5487-5530
-//   handle_codex_review: 5532-5569
+//   default_data_dir: 38-44
+//   tasks_dir: 100-100
+//   history_dir: 101-101
+//   gemini_cmd: 102-102
+//   claude_code_cmd: 103-103
+//   codex_cmd: 104-104
+//   workflow_patterns_dir: 105-105
+//   rollback_dir: 106-106
+//   learned_patterns_dir: 107-107
+//   node_cmd: 108-108
+//   loaves_dir: 110-110
+//   loaves_archive_dir: 111-111
+//   spawn_visible_terminal: 124-155
+//   default_max_retries: 278-278
+//   spawn_retry_execution: 1092-1138
+//   spawn_on_complete: 1142-1195 [med]
+//   run_gpt_task: 1201-1350 [LARGE]
+//   run_codex_task: 1354-1463 [LARGE]
+//   run_cli_task: 1464-1886 [LARGE]
+//   safe_truncate: 1893-1898
+//   ensure_safety_validation: 1902-1908
+//   extract_safety_warning: 1910-1915
+//   handle_submit_task: 1917-2245 [LARGE]
+//   handle_watch_tasks: 2249-2369 [LARGE]
+//   handle_get_status: 2371-2449 [med]
+//   handle_get_output: 2451-2483
+//   handle_list_tasks: 2485-2547 [med]
+//   handle_cancel_task: 2549-2591
+//   kill_process_tree: 2595-2630
+//   handle_task_poll: 2633-2681
+//   build_status_bar: 2684-2730
+//   read_state_file: 2733-2745
+//   read_active_loaf_summary: 2748-2756
+//   compute_task_fingerprint: 2759-2768
+//   handle_status_bar: 2771-2774
+//   handle_pause_task: 2776-2796
+//   handle_resume_task: 2798-2826
+//   handle_configure: 2828-2862
+//   handle_cleanup: 2864-2892
+//   run_workflow_step: 2898-2978 [med]
+//   handle_run_workflow: 2980-3173 [LARGE]
+//   handle_run_parallel: 3190-3339 [LARGE]
+//   run_parallel_workflow: 3342-3408 [med]
+//   launch_step: 3411-3539 [LARGE]
+//   handle_decompose_task: 3545-3623 [med]
+//   handle_save_template: 3625-3647
+//   handle_list_templates: 3649-3675
+//   handle_run_template: 3677-3723
+//   handle_explain_task: 3725-3769
+//   loaf_path: 3775-3777
+//   find_active_loaf: 3780-3799
+//   handle_loaf_create: 3801-3839
+//   handle_loaf_update: 3841-3977 [LARGE]
+//   handle_loaf_status: 3979-4018
+//   handle_loaf_close: 4020-4055
+//   handle_list_sessions: 4061-4118 [med]
+//   handle_get_analytics: 4120-4196 [med]
+//   handle_run_analyzer: 4202-4209
+//   get_role_prompt: 4215-4255
+//   list_roles: 4257-4267
+//   custom_roles_dir: 4278-4282
+//   load_custom_roles: 4284-4294
+//   get_custom_role_prompt: 4296-4301
+//   handle_role_list: 4303-4318
+//   handle_role_create: 4320-4349
+//   handle_role_delete: 4351-4361
+//   save_task_artifact: 4367-4399
+//   handle_tool_call: 4405-4452
+//   handle_review_extractions: 4458-4475
+//   handle_extract_workflow: 4477-4496
+//   handle_dismiss_extraction: 4498-4506
+//   handle_rollback_task: 4508-4514
+//   handle_retry_task: 4517-4557
+//   handle_task_rerun: 4563-4744 [LARGE]
+//   handle_route_task: 4750-4760
+//   get_tools_list: 4766-5396 [LARGE]
+//   dash_status: 5408-5423
+//   dash_status_by_id: 5425-5438
+//   dash_health: 5440-5454
+//   dash_inbox: 5456-5475
+//   flush_entry: 5477-5484
+//   dash_get_prefs: 5486-5493
+//   dash_post_prefs: 5495-5504
+//   dash_post_task: 5506-5575 [med]
+//   dash_cancel: 5577-5593
+//   dash_knowledge: 5595-5621
+//   dash_git: 5623-5635
+//   dash_system: 5637-5660
+//   dash_history: 5662-5671
+//   volumes_base_path: 5673-5677
+//   validate_volumes_path: 5680-5695
+//   api_read_file: 5702-5722
+//   api_list_dir: 5724-5755
+//   start_dashboard: 5757-5794
+//   lock_path: 5802-5804
+//   try_acquire_lock: 5808-5863 [med]
+//   run_as_proxy: 5866-5923 [med]
+//   start_pipe_server: 5927-6056 [LARGE]
+//   main: 6062-6233 [LARGE]
+//   handle_start_session: 6242-6395 [LARGE]
+//   session_heartbeat: 6398-6441
+//   handle_session_destroy: 6444-6491
+//   handle_send_to_session: 6493-6590 [med]
+//   handle_open_terminal: 6592-6647 [med]
+//   handle_gemini_direct: 6649-6668
+//   handle_codex_exec: 6670-6713
+//   handle_codex_review: 6715-6752
 //
-
-// ============================================================================
-// Tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_kill_process_tree_spawns_and_kills() {
-        // Spawn a long-running child process (ping -n 9999 localhost on Windows)
-        let child = std::process::Command::new("cmd")
-            .args(["/C", "ping -n 9999 127.0.0.1 > nul"])
-            .spawn()
-            .expect("Failed to spawn test child process");
-
-        let root_pid = child.id();
-
-        // Give it a moment to start
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        // Verify it's alive
-        let alive_check = std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {}", root_pid), "/NH"])
-            .output()
-            .expect("tasklist failed");
-        let alive_text = String::from_utf8_lossy(&alive_check.stdout);
-        assert!(
-            alive_text.contains(&root_pid.to_string()),
-            "Child process {} should be alive before cancel. Output: {}",
-            root_pid,
-            alive_text
-        );
-
-        // Kill the process tree
-        let killed = kill_process_tree(root_pid);
-
-        // Give OS time to reap
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        // Verify root is dead
-        let dead_check = std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {}", root_pid), "/NH"])
-            .output()
-            .expect("tasklist failed");
-        let dead_text = String::from_utf8_lossy(&dead_check.stdout);
-        // tasklist returns "INFO: No tasks are running which match the specified criteria." when PID is gone
-        let still_alive = dead_text.contains("cmd.exe") || dead_text.contains("PING");
-        assert!(
-            !still_alive,
-            "Child process {} should be dead after kill_process_tree. killed={:?} Output: {}",
-            root_pid,
-            killed,
-            dead_text
-        );
-
-        // killed should contain at least the root
-        assert!(
-            !killed.is_empty(),
-            "kill_process_tree should report at least one killed PID, got: {:?}",
-            killed
-        );
-    }
-
-    #[test]
-    fn test_compute_fingerprint_deterministic() {
-        let fp1 = compute_task_fingerprint(&Backend::ClaudeCode, "test prompt", Some("C:\\test"));
-        let fp2 = compute_task_fingerprint(&Backend::ClaudeCode, "test prompt", Some("C:\\test"));
-        assert_eq!(fp1, fp2, "Same inputs should produce same fingerprint");
-
-        let fp3 = compute_task_fingerprint(&Backend::Gpt, "test prompt", Some("C:\\test"));
-        assert_ne!(fp1, fp3, "Different backend should produce different fingerprint");
-
-        let fp4 = compute_task_fingerprint(&Backend::ClaudeCode, "different prompt", Some("C:\\test"));
-        assert_ne!(fp1, fp4, "Different prompt should produce different fingerprint");
-    }
-
-    #[test]
-    fn test_compute_fingerprint_truncates_prompt() {
-        let short = "a".repeat(200);
-        let long = format!("{}extra_stuff", "a".repeat(200));
-        let fp_short = compute_task_fingerprint(&Backend::ClaudeCode, &short, None);
-        let fp_long = compute_task_fingerprint(&Backend::ClaudeCode, &long, None);
-        assert_eq!(fp_short, fp_long, "Fingerprint should only use first 200 chars of prompt");
-    }
-}
 // === END FILE NAVIGATION ===

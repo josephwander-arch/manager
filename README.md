@@ -9,6 +9,15 @@ One MCP server. Four backends. Server-side blocking. Durable coordination.
 
 ---
 
+## What's New in v1.2.1
+
+**Notify tool and watchdog scope fixes.**
+
+- **`notify`** — Windows toast notifications with title, body, icon (info/warning/error), and configurable duration. Use for background task completion alerts and status updates.
+- **Watchdog scope fixes** — improved process-tree detection edge cases.
+
+---
+
 ## What's New in v1.2.3
 
 **Real cancel-kill, output-as-timer async model, status_bar, and fingerprint dedup.**
@@ -326,6 +335,7 @@ task_watch(task_ids=["task_1", "task_2"], timeout=600)
 | Tool | Purpose |
 |------|---------|
 | `status_bar` | One-line system summary: manager + breadcrumb + loaf (new v1.2.3) |
+| `notify` | Windows toast notification with title, body, icon, duration (new v1.2.1) |
 | `get_analytics` | Query historical task performance data |
 | `configure` | Update manager settings at runtime |
 | `role_create` | Define a named backend role |

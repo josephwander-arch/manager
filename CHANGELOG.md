@@ -2,6 +2,14 @@
 
 All notable changes to the Manager MCP Server are documented here.
 
+## [1.2.1] - 2026-04-15 — Phase C Fix3
+
+### Added
+- **`notify` tool** — Windows toast notifications with title, body, icon (info/warning/error), and configurable duration. Use for background task completion alerts and status updates.
+
+### Fixed
+- **Watchdog scope fixes** — improved process-tree detection edge cases
+
 ## [1.2.4] - 2026-04-14
 
 ### Fixed
