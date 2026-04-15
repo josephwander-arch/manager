@@ -4063,7 +4063,7 @@ fn handle_loaf_close(_server: &Server, params: Value) -> Result<Value, String> {
 
 fn handle_list_sessions(server: &Server, args: Value) -> Result<Value, String> {
     let include_stalled = args.get("include_stalled").and_then(|v| v.as_bool()).unwrap_or(false);
-    let session_dir = std::path::Path::new(SESSION_DIR);
+    let session_dir = std::path::Path::new(session_dir());
     if !session_dir.exists() {
         return Ok(json!({"sessions": [], "count": 0}));
     }
@@ -6448,7 +6448,39 @@ fn main() {
 // Session Management (absorbed from claude-bridge/claude-runner)
 // ============================================================================
 
-const SESSION_DIR: &str = r"C:\temp\manager-sessions";
+const LEGACY_SESSION_DIR: &str = r"C:\temp\manager-sessions";
+
+/// Returns true if `dir` contains at least one session subdirectory with a meta.json.
+fn has_session_data(dir: &std::path::Path) -> bool {
+    dir.read_dir()
+        .map(|mut d| {
+            d.any(|e| {
+                e.ok()
+                    .map(|e| e.path().join("meta.json").exists())
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Testable inner resolver — takes `legacy` as parameter so tests can inject tempdirs.
+pub(crate) fn _resolve_session_dir(legacy: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    if legacy.exists() && has_session_data(legacy) {
+        return Ok(legacy.to_path_buf());
+    }
+    cpc_paths::data_path("manager").map_err(|e| e.to_string())
+}
+
+static _SESSION_DIR: Lazy<String> = Lazy::new(|| {
+    match _resolve_session_dir(std::path::Path::new(LEGACY_SESSION_DIR)) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(_) => LEGACY_SESSION_DIR.to_string(),
+    }
+});
+
+fn session_dir() -> &'static str {
+    &_SESSION_DIR
+}
 
 fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
     let prompt = args.get("prompt").and_then(|v| v.as_str())
@@ -6504,7 +6536,7 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
     let session_id = format!("ses_{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
     // Create session directory
-    let session_path = format!("{}\\{}", SESSION_DIR, session_id);
+    let session_path = format!("{}\\{}", session_dir(), session_id);
     let _ = std::fs::create_dir_all(&session_path);
 
     // Build args - use -p for first prompt, store session for continuation
@@ -6744,7 +6776,7 @@ fn handle_session_destroy(server: &Server, args: Value) -> Result<Value, String>
         .ok_or("Missing 'session_id'")?;
 
     // v1.2.6: fire notify_on_destroy before killing, so the toast has time to show
-    let meta_file = format!("{}\\{}\\meta.json", SESSION_DIR, session_id);
+    let meta_file = format!("{}\\{}\\meta.json", session_dir(), session_id);
     if let Ok(content) = std::fs::read_to_string(&meta_file) {
         if let Ok(meta) = serde_json::from_str::<Value>(&content) {
             if meta.get("notify_on_destroy").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -6784,7 +6816,7 @@ fn handle_session_destroy(server: &Server, args: Value) -> Result<Value, String>
     }
 
     // Update meta.json
-    let meta_file = format!("{}\\{}\\meta.json", SESSION_DIR, session_id);
+    let meta_file = format!("{}\\{}\\meta.json", session_dir(), session_id);
     if let Ok(content) = std::fs::read_to_string(&meta_file) {
         if let Ok(mut meta) = serde_json::from_str::<Value>(&content) {
             meta["alive"] = json!(false);
@@ -6812,7 +6844,7 @@ fn handle_send_to_session(server: &Server, args: Value) -> Result<Value, String>
         .ok_or("Missing 'message'")?;
     
     // Read session metadata for working_dir and model
-    let meta_path = format!("{}\\{}\\meta.json", SESSION_DIR, session_id);
+    let meta_path = format!("{}\\{}\\meta.json", session_dir(), session_id);
     let meta: Value = std::fs::read_to_string(&meta_path)
         .map(|s| serde_json::from_str(&s).unwrap_or(json!({})))
         .unwrap_or(json!({}));
@@ -7209,6 +7241,28 @@ mod tests {
 
         // Cleanup
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_session_dir_legacy_path_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a session subdir with meta.json — simulates Joe's machine
+        let session_sub = dir.path().join("ses_abc123");
+        std::fs::create_dir_all(&session_sub).unwrap();
+        std::fs::write(session_sub.join("meta.json"), "{}").unwrap();
+
+        let result = _resolve_session_dir(dir.path()).unwrap();
+        assert_eq!(result, dir.path(), "legacy session dir with meta.json should be returned");
+    }
+
+    #[test]
+    fn test_session_dir_no_legacy_falls_through() {
+        let dir = tempfile::tempdir().unwrap();
+        // Empty tempdir — no session subdirs with meta.json
+        assert!(
+            !has_session_data(dir.path()),
+            "empty dir must not be detected as legacy session data"
+        );
     }
 }
 

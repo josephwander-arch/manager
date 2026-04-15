@@ -4,6 +4,9 @@ All notable changes to the Manager MCP Server are documented here.
 
 ## [Unreleased]
 
+### Changed
+- Add legacy-fallback path resolution for session directory. Existing `C:\temp\manager-sessions\` (if present with session data) continues to be used; new installs use `cpc_paths::data_path("manager")` default.
+
 ### Added
 - **`cpc-paths` dependency** (v0.1.0) — portable path discovery library added as a git dep pinned to tag v0.1.0. No behavior change. Groundwork for future health/diagnostic integration.
 
