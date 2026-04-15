@@ -185,7 +185,19 @@ budgets — let them write code.
 
 ---
 
-## Installation
+## Installation & Per-Machine Setup
+
+This is a standalone Rust MCP server for Claude Desktop / Claude Code. Each machine that runs the server needs its own copy of the binary plus a few config tweaks.
+
+**Quick install:**
+1. Download the right binary from [Releases](https://github.com/josephwander-arch/manager/releases) — `_arm64.exe` for Windows ARM64, `_x64.exe` for x64.
+2. Copy to `C:\CPC\servers\manager.exe`.
+3. Edit `%APPDATA%\Claude\claude_desktop_config.json` — paste the snippet from [`claude_desktop_config.example.json`](./claude_desktop_config.example.json) into your `mcpServers` object.
+4. Restart Claude Desktop.
+
+For full per-machine setup (paths, backend CLI auth, toast notifications), see [`docs/per_machine_setup.md`](./docs/per_machine_setup.md).
+
+A future `cpc-setup.exe` helper will automate this entire process.
 
 ### Prerequisites
 
