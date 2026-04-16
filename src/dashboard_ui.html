@@ -99,7 +99,8 @@ select.filter-select { background: var(--bg-card); color: var(--text-secondary);
 .bc-card { background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
 .bc-card.stale { border-color: var(--accent-amber); box-shadow: 0 0 8px rgba(245,158,11,0.15); }
 .bc-progress-bar { height: 5px; background: var(--border); border-radius: 3px; margin: 5px 0; overflow: hidden; }
-.bc-progress-fill { height: 100%; background: var(--accent-blue); border-radius: 3px; transition: width 0.3s; }
+.bc-progress-fill { height: 100%; background: var(--accent-green); border-radius: 3px; transition: width 0.3s; }
+.bc-progress-label { font-size: 10px; color: var(--text-secondary); margin-top: 2px; }
 .bc-meta { font-size: 11px; color: var(--text-secondary); display: flex; gap: 10px; flex-wrap: wrap; margin-top: 3px; }
 
 /* Scorecard */
@@ -137,6 +138,14 @@ select.filter-select { background: var(--bg-card); color: var(--text-secondary);
 /* View modes */
 body.view-ops #services-row, body.view-ops #autonomous-row { display: block; }
 body.view-summary #panels-row, body.view-summary #services-row, body.view-summary #autonomous-row { display: none; }
+
+/* Partial install — collapse unreachable optional servers */
+#partial-install-footer { display: none; padding: 6px 16px; font-size: 11px; color: var(--text-secondary); text-align: center; }
+#partial-install-footer.visible { display: flex; align-items: center; justify-content: center; gap: 8px; }
+.show-all-link { color: var(--accent-blue); cursor: pointer; }
+.show-all-link:hover { text-decoration: underline; }
+/* Expand panel bodies when service panels are hidden */
+body.no-services .panel-body { max-height: 520px; }
 </style>
 </head>
 <body class="view-full">
@@ -150,6 +159,7 @@ body.view-summary #panels-row, body.view-summary #services-row, body.view-summar
   <div id="strip-hands" class="server-pill"><span class="server-dot dot-offline"></span><span class="server-name">hands</span><span class="server-ver"></span><span class="server-age"></span></div>
   <div id="strip-workflow" class="server-pill"><span class="server-dot dot-offline"></span><span class="server-name">workflow</span><span class="server-ver"></span><span class="server-age"></span></div>
   <div id="strip-autonomous" class="server-pill"><span class="server-dot dot-offline"></span><span class="server-name">autonomous</span><span class="server-ver"></span><span class="server-age"></span></div>
+  <div id="strip-voice" class="server-pill"><span class="server-dot dot-offline"></span><span class="server-name">voice</span><span class="server-ver"></span><span class="server-age"></span></div>
   <span id="last-refresh" style="margin-left:auto;font-size:11px;color:var(--text-secondary)"></span>
 </div>
 
@@ -224,6 +234,12 @@ body.view-summary #panels-row, body.view-summary #services-row, body.view-summar
     <div class="service-grid" id="autonomous-grid"></div>
   </div>
 
+  <!-- Partial install footer -->
+  <div id="partial-install-footer">
+    <span id="partial-install-msg"></span>
+    <a class="show-all-link" onclick="showAllServers()">Show all</a>
+  </div>
+
 </div><!-- /main -->
 
 <!-- Action bar -->
@@ -249,8 +265,11 @@ body.view-summary #panels-row, body.view-summary #services-row, body.view-summar
 // ============================================================
 const state = {
   config: null,
-  servers: { manager: null, local: null, hands: null, workflow: null, autonomous: null },
+  servers: { manager: null, local: null, hands: null, workflow: null, autonomous: null, voice: null },
   lastSeen: {},
+  failCounts: { manager: 0, local: 0, hands: 0, workflow: 0, autonomous: 0, voice: 0 },
+  collapsedNeverSeen: { hands: false, workflow: false, autonomous: false, voice: false },
+  showAll: false,
   statusFilter: 'all',
   view: 'full',
   startTimes: {}, // task_id -> Date (for live timers)
@@ -271,8 +290,8 @@ async function boot() {
     state.config = cfg;
   } catch(e) {
     state.config = {
-      ports: { manager: location.port || 9100, local: 9101, hands: 9102, workflow: 9103, autonomous: 9104 },
-      poll_intervals_ms: { manager: 5000, local: 5000, hands: 5000, workflow: 42000, autonomous: 42000 }
+      ports: { manager: location.port || 9100, local: 9101, hands: 9102, workflow: 9103, autonomous: 9104, voice: 9105 },
+      poll_intervals_ms: { manager: 5000, local: 5000, hands: 5000, workflow: 42000, autonomous: 42000, voice: 42000 }
     };
   }
   startPolling();
@@ -289,6 +308,16 @@ function startPolling() {
   pollServer('hands',   `http://127.0.0.1:${ports.hands}/api/status`,   intervals.hands);
   pollServer('workflow',`http://127.0.0.1:${ports.workflow}/api/status`, intervals.workflow);
   pollServer('autonomous',`http://127.0.0.1:${ports.autonomous}/api/status`, intervals.autonomous);
+  pollServer('voice',     `http://127.0.0.1:${ports.voice}/api/status`,     intervals.voice);
+}
+
+function trackFail(name) {
+  if (!state.lastSeen[name] && name in state.collapsedNeverSeen) {
+    state.failCounts[name] = (state.failCounts[name] || 0) + 1;
+    if (state.failCounts[name] >= 2) {
+      state.collapsedNeverSeen[name] = true;
+    }
+  }
 }
 
 async function pollServer(name, url, intervalMs) {
@@ -299,11 +328,18 @@ async function pollServer(name, url, intervalMs) {
         const data = await r.json();
         state.servers[name] = data;
         state.lastSeen[name] = Date.now();
+        state.failCounts[name] = 0;
+        // If it comes online after being collapsed, un-collapse
+        if (state.collapsedNeverSeen[name]) {
+          state.collapsedNeverSeen[name] = false;
+        }
       } else {
         state.servers[name] = { _error: r.status };
+        trackFail(name);
       }
     } catch(e) {
       // offline — keep last data but note time
+      trackFail(name);
     }
     renderAll();
   }
@@ -339,6 +375,7 @@ function renderAll() {
   renderHandsPanel();
   renderWorkflowPanel();
   renderAutonomousPanel();
+  updatePartialInstallLayout();
   document.getElementById('last-refresh').textContent = `updated ${new Date().toLocaleTimeString()}`;
 }
 
@@ -346,7 +383,7 @@ function renderAll() {
 // Health strip
 // ============================================================
 function renderHealthStrip() {
-  const servers = ['manager','local','hands','workflow','autonomous'];
+  const servers = ['manager','local','hands','workflow','autonomous','voice'];
   servers.forEach(name => {
     const el = document.getElementById(`strip-${name}`);
     const dot = el.querySelector('.server-dot');
@@ -354,6 +391,10 @@ function renderHealthStrip() {
     const age = el.querySelector('.server-age');
     const data = state.servers[name];
     const seen = state.lastSeen[name];
+
+    // Hide pill entirely for optional servers that were never seen and are collapsed
+    const isCollapsed = !state.showAll && state.collapsedNeverSeen[name];
+    el.style.display = isCollapsed ? 'none' : '';
 
     if (seen) {
       const secAgo = Math.floor((Date.now() - seen) / 1000);
@@ -493,7 +534,9 @@ function renderBreadcrumbs() {
 
   const now = Date.now();
   panel.innerHTML = active.map(b => {
-    const pct = b.total_steps > 0 ? Math.round(b.steps_completed / b.total_steps * 100) : 0;
+    const current = b.current_step ?? b.steps_completed ?? 0;
+    const total = b.total_steps ?? 0;
+    const pct = total > 0 ? Math.round(current / total * 100) : 0;
     const lastAct = b.last_activity_at ? new Date(b.last_activity_at).getTime() : 0;
     const staleSecs = lastAct ? Math.floor((now - lastAct) / 1000) : null;
     const stale = staleSecs !== null && staleSecs > 300;
@@ -502,9 +545,10 @@ function renderBreadcrumbs() {
     return `<div class="bc-card${stale?' stale':''}">
       <div class="card-row">
         <span class="card-title">${escHtml(b.name||b.id)}</span>
-        <span class="badge badge-running">${b.steps_completed}/${b.total_steps}</span>
+        <span class="badge badge-running">${current}/${total}</span>
       </div>
       <div class="bc-progress-bar"><div class="bc-progress-fill" style="width:${pct}%"></div></div>
+      <div class="bc-progress-label">${current} / ${total} steps</div>
       <div class="bc-meta">
         ${b.project_id ? `<span>📁 ${escHtml(b.project_id)}</span>` : ''}
         ${b.owner ? `<span>👤 ${escHtml(b.owner)}</span>` : ''}
@@ -548,10 +592,17 @@ function renderScorecard() {
 // Service panels
 // ============================================================
 function renderHandsPanel() {
+  const panel = document.getElementById('hands-panel');
   const grid = document.getElementById('hands-grid');
   const age = document.getElementById('hands-age');
   const data = state.servers.hands;
   const seen = state.lastSeen.hands;
+
+  if (!state.showAll && state.collapsedNeverSeen.hands) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = '';
 
   if (seen) age.textContent = `${Math.floor((Date.now()-seen)/1000)}s ago`;
 
@@ -574,10 +625,17 @@ function renderHandsPanel() {
 }
 
 function renderWorkflowPanel() {
+  const panel = document.getElementById('workflow-panel');
   const grid = document.getElementById('workflow-grid');
   const age = document.getElementById('workflow-age');
   const data = state.servers.workflow;
   const seen = state.lastSeen.workflow;
+
+  if (!state.showAll && state.collapsedNeverSeen.workflow) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = '';
 
   if (seen) age.textContent = `${Math.floor((Date.now()-seen)/1000)}s ago`;
 
@@ -606,6 +664,7 @@ function renderAutonomousPanel() {
   const data = state.servers.autonomous;
   const seen = state.lastSeen.autonomous;
 
+  if (!state.showAll && state.collapsedNeverSeen.autonomous) { panel.style.display = 'none'; return; }
   if (!data && !seen) { panel.style.display = 'none'; return; }
   panel.style.display = '';
   if (seen) age.textContent = `${Math.floor((Date.now()-seen)/1000)}s ago`;
@@ -704,6 +763,44 @@ function showToast(msg) {
   t.textContent = msg;
   t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+// ============================================================
+// Partial install layout
+// ============================================================
+function updatePartialInstallLayout() {
+  const optional = ['hands', 'workflow', 'autonomous', 'voice'];
+  const collapsed = optional.filter(n => !state.showAll && state.collapsedNeverSeen[n]);
+  const footer = document.getElementById('partial-install-footer');
+  const msg = document.getElementById('partial-install-msg');
+  const servicesRow = document.getElementById('services-row');
+  const showAllLink = footer.querySelector('.show-all-link');
+
+  // Show/hide footer
+  if (collapsed.length > 0 && !state.showAll) {
+    const names = collapsed.join(', ');
+    msg.textContent = `${collapsed.length} additional server${collapsed.length > 1 ? 's' : ''} not detected (${names}) ·`;
+    footer.classList.add('visible');
+    showAllLink.style.display = '';
+  } else {
+    footer.classList.remove('visible');
+  }
+
+  // Hide services-row entirely when both hands and workflow are collapsed
+  const handsCollapsed = !state.showAll && state.collapsedNeverSeen.hands;
+  const workflowCollapsed = !state.showAll && state.collapsedNeverSeen.workflow;
+  if (handsCollapsed && workflowCollapsed) {
+    servicesRow.style.display = 'none';
+    document.body.classList.add('no-services');
+  } else {
+    servicesRow.style.display = '';
+    document.body.classList.remove('no-services');
+  }
+}
+
+function showAllServers() {
+  state.showAll = true;
+  renderAll();
 }
 
 // ============================================================
