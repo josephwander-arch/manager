@@ -2,6 +2,30 @@
 
 All notable changes to the Manager MCP Server are documented here.
 
+## [1.2.8] - 2026-04-15
+
+### Added
+
+- **CPC Operational Dashboard** — `GET /` serves a dark-theme single-file HTML dashboard. Polls all 5 CPC servers (manager:9100, local:9101, hands:9102, workflow:9103, autonomous:9104) at configurable intervals (5s fast, 42s slow). Features: health strip, session/task cards with live elapsed timers, breadcrumb progress bars, today's scorecard, per-server service panels, quick action bar.
+
+- **`GET /api/status`** — rich JSON endpoint: session counts (running/queued/done/failed/orphaned), last 20 task details, active loaf, `status_bar` output, version. Used by the dashboard frontend and `live_status.json` writer.
+
+- **`GET /api/config`** — returns port assignments and poll intervals so the frontend self-configures without hardcoded values.
+
+- **`live_status.json` writer** — every 30 seconds, polls all 5 servers and writes `{VOLUMES}/dashboard/live_status.json`. Consumed by React artifacts in Claude.ai via Google Drive for cross-device status visibility.
+
+- **`dashboard_open` MCP tool** — opens the dashboard in the default browser; returns the URL.
+
+- **`dashboard_stop` MCP tool** — aborts the dashboard tokio task and resets port tracking.
+
+- **`dashboard_status` MCP tool** — returns `{running, port, url}` from atomic globals.
+
+- **Port fallback** — if `CPC_DASHBOARD_PORT` (default 9100) is busy, tries 9100–9105 and logs which port was used. Binds `127.0.0.1` only.
+
+### Changed
+
+- `start_dashboard` now reads `CPC_DASHBOARD_PORT` env var (was `CPC_MANAGER_PORT`; backward-compat alias kept). Stores actual bound port in `DASHBOARD_PORT` atomic for tool introspection.
+
 ## [1.2.7] - 2026-04-15
 
 ### Added

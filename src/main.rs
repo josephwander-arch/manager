@@ -4,7 +4,7 @@
 //! Submit Ã¢â€ â€™ Poll Ã¢â€ â€™ Retrieve pattern for long-running tasks
 //!
 //! Tools: submit_task, get_status, get_output, list_tasks, cancel_task, configure, retry_task
-// NAV: TOC at line 7269 | 124 fn | 18 struct | 2026-04-15
+// NAV: TOC at line 7450 | 133 fn | 18 struct | 2026-04-15
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,15 @@ const GPT_API_URL: &str = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_GPT_MODEL: &str = "o3";
 
 use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+
+/// Port the dashboard HTTP listener actually bound to (0 = not running).
+static DASHBOARD_PORT: AtomicU16 = AtomicU16::new(0);
+/// True while the dashboard listener task is alive.
+static DASHBOARD_RUNNING: AtomicBool = AtomicBool::new(false);
+/// AbortHandle for the dashboard tokio task — used by `dashboard_stop` MCP tool.
+static DASHBOARD_ABORT: Lazy<Mutex<Option<tokio::task::AbortHandle>>> =
+    Lazy::new(|| Mutex::new(None));
 
 fn default_data_dir() -> String {
     std::env::var("MANAGER_DATA_DIR")
@@ -4524,8 +4533,52 @@ fn handle_tool_call(server: &Server, tool: &str, args: Value) -> Result<Value, S
         "role_create" | "create_role" => handle_role_create(args),
         "role_delete" | "delete_role" => handle_role_delete(args),
         "notify" => Ok(handle_notify(args)),
+        "dashboard_open"   => Ok(handle_dashboard_open()),
+        "dashboard_stop"   => Ok(handle_dashboard_stop()),
+        "dashboard_status" => Ok(handle_dashboard_status()),
         _ => Err(format!("Unknown tool: {}", tool)),
     }
+}
+
+fn handle_dashboard_open() -> Value {
+    let port = DASHBOARD_PORT.load(Ordering::Relaxed);
+    if port == 0 {
+        return json!({"error": "Dashboard is not running. It starts automatically with the manager server."});
+    }
+    let url = format!("http://127.0.0.1:{}/", port);
+    // Launch browser via start command
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .spawn();
+    json!({"opened": true, "url": url, "port": port})
+}
+
+fn handle_dashboard_stop() -> Value {
+    let handle = DASHBOARD_ABORT.lock().unwrap().take();
+    match handle {
+        Some(h) => {
+            h.abort();
+            DASHBOARD_RUNNING.store(false, Ordering::SeqCst);
+            DASHBOARD_PORT.store(0, Ordering::SeqCst);
+            json!({"stopped": true, "message": "Dashboard listener aborted."})
+        }
+        None => json!({"stopped": false, "message": "Dashboard was not running or already stopped."})
+    }
+}
+
+fn handle_dashboard_status() -> Value {
+    let running = DASHBOARD_RUNNING.load(Ordering::Relaxed);
+    let port    = DASHBOARD_PORT.load(Ordering::Relaxed);
+    let url     = if running && port > 0 {
+        format!("http://127.0.0.1:{}/", port)
+    } else {
+        String::new()
+    };
+    json!({
+        "running": running,
+        "port":    port,
+        "url":     url,
+    })
 }
 
 // ============================================================================
@@ -5673,6 +5726,21 @@ fn get_tools_list() -> Value {
                         "duration_ms": { "type": "integer", "default": 5000, "description": "Display duration in milliseconds" }
                     }
                 }
+            },
+            {
+                "name": "dashboard_open",
+                "description": "Open the CPC operational dashboard in the default browser. Returns the URL. The dashboard shows live session/task status, breadcrumbs, server health, and scorecard.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "dashboard_stop",
+                "description": "Stop the dashboard HTTP listener. Use when you want to free the port or restart the dashboard.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "dashboard_status",
+                "description": "Get the current dashboard HTTP server status: whether it is running, which port it bound to, and the URL.",
+                "inputSchema": { "type": "object", "properties": {} }
             }
         ]
     })
@@ -6037,11 +6105,139 @@ async fn api_list_dir(Query(q): Query<PathQuery>) -> impl IntoResponse {
     ).into_response()
 }
 
+/// GET / — serve embedded dashboard HTML
+async fn dash_root() -> impl IntoResponse {
+    const HTML: &str = include_str!("dashboard_ui.html");
+    axum::response::Html(HTML)
+}
+
+/// GET /api/status — rich manager status for the dashboard frontend and live_status.json
+async fn dash_api_status(State(st): State<DashboardState>) -> Json<Value> {
+    let store = st.tasks.read().await;
+    let running  = store.values().filter(|t| t.status == TaskStatus::Running).count();
+    let queued   = store.values().filter(|t| t.status == TaskStatus::Queued).count();
+    let done     = store.values().filter(|t| t.status == TaskStatus::Done).count();
+    let failed   = store.values().filter(|t| t.status == TaskStatus::Failed).count();
+    let orphaned = store.values().filter(|t| t.status == TaskStatus::Orphaned).count();
+
+    let mut tasks: Vec<&Task> = store.values().collect();
+    tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let tasks_json: Vec<Value> = tasks.iter().take(20).map(|t| json!({
+        "id": t.id,
+        "backend": t.backend.to_string(),
+        "status": t.status.to_string(),
+        "prompt_preview": safe_truncate(&t.prompt, 80),
+        "created_at": t.created_at.to_rfc3339(),
+        "started_at": t.started_at.map(|s| s.to_rfc3339()),
+        "completed_at": t.completed_at.map(|s| s.to_rfc3339()),
+        "progress_lines": t.progress_lines,
+        "last_activity": t.last_activity.map(|la| la.to_rfc3339()),
+        "stall_detected": t.stall_detected,
+        "orphaned": t.status == TaskStatus::Orphaned,
+    })).collect();
+
+    let status_bar = build_status_bar(&store);
+    let loaf = find_active_loaf().map(|(id, loaf)| json!({"id": id, "data": loaf}));
+
+    Json(json!({
+        "version": "1.2.8",
+        "sessions": {
+            "running": running,
+            "queued": queued,
+            "done": done,
+            "failed": failed,
+            "orphaned": orphaned,
+            "total": store.len(),
+        },
+        "tasks": tasks_json,
+        "loaf": loaf,
+        "status_bar": status_bar,
+        "timestamp": Utc::now().to_rfc3339(),
+    }))
+}
+
+/// GET /api/config — dashboard configuration (ports + poll intervals)
+async fn dash_api_config() -> Json<Value> {
+    let port = DASHBOARD_PORT.load(Ordering::Relaxed);
+    Json(json!({
+        "ports": {
+            "manager":    port,
+            "local":      9101u16,
+            "hands":      9102u16,
+            "workflow":   9103u16,
+            "autonomous": 9104u16,
+        },
+        "poll_intervals_ms": {
+            "manager":    5000u32,
+            "local":      5000u32,
+            "hands":      5000u32,
+            "workflow":   42000u32,
+            "autonomous": 42000u32,
+        },
+        "version": "1.2.8",
+    }))
+}
+
+/// Resolve Volumes path from env or default.
+fn volumes_path() -> String {
+    std::env::var("CPC_VOLUMES_DIR")
+        .unwrap_or_else(|_| r"C:\My Drive\Volumes".to_string())
+}
+
+/// Fetch /api/status from a server on localhost. Returns None if unreachable.
+async fn fetch_peer_status(client: &reqwest::Client, port: u16) -> Option<Value> {
+    let url = format!("http://127.0.0.1:{}/api/status", port);
+    match client.get(&url).timeout(std::time::Duration::from_secs(3)).send().await {
+        Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
+        _ => None,
+    }
+}
+
+/// Background task: every 30s poll all 5 servers and write Volumes/dashboard/live_status.json.
+async fn live_status_writer(manager_port: u16) {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let vpath = volumes_path();
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    interval.tick().await; // skip immediate first tick — let server settle
+    loop {
+        interval.tick().await;
+        if !DASHBOARD_RUNNING.load(Ordering::Relaxed) { break; }
+
+        let manager_status  = fetch_peer_status(&client, manager_port).await;
+        let local_status    = fetch_peer_status(&client, 9101).await;
+        let hands_status    = fetch_peer_status(&client, 9102).await;
+        let workflow_status = fetch_peer_status(&client, 9103).await;
+        let auto_status     = fetch_peer_status(&client, 9104).await;
+
+        let payload = json!({
+            "timestamp":  Utc::now().to_rfc3339(),
+            "manager":    manager_status,
+            "local":      local_status,
+            "hands":      hands_status,
+            "workflow":   workflow_status,
+            "autonomous": auto_status,
+        });
+
+        let dashboard_dir = format!(r"{}\dashboard", vpath);
+        if std::fs::create_dir_all(&dashboard_dir).is_ok() {
+            let path = format!(r"{}\live_status.json", dashboard_dir);
+            let _ = std::fs::write(&path, serde_json::to_string_pretty(&payload).unwrap_or_default());
+        }
+    }
+}
+
 async fn start_dashboard(state: DashboardState) {
-    let port: u16 = std::env::var("CPC_MANAGER_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(9876);
+    // Port priority: CPC_DASHBOARD_PORT → CPC_MANAGER_PORT → default 9100
+    let preferred: u16 = std::env::var("CPC_DASHBOARD_PORT")
+        .ok().and_then(|p| p.parse().ok())
+        .or_else(|| std::env::var("CPC_MANAGER_PORT").ok().and_then(|p| p.parse().ok()))
+        .unwrap_or(9100);
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -6049,6 +6245,11 @@ async fn start_dashboard(state: DashboardState) {
         .allow_headers(Any);
 
     let app = Router::new()
+        // v1.2.8: new dashboard routes
+        .route("/", get(dash_root))
+        .route("/api/status", get(dash_api_status))
+        .route("/api/config", get(dash_api_config))
+        // legacy routes kept for backward compat
         .route("/status", get(dash_status))
         .route("/status/:id", get(dash_status_by_id))
         .route("/health", get(dash_health))
@@ -6065,15 +6266,32 @@ async fn start_dashboard(state: DashboardState) {
         .layer(cors)
         .with_state(state);
 
-    let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await {
-        Ok(l) => l,
-        Err(e) => {
-            warn!("Dashboard failed to bind port {}: {}", port, e);
-            return;
+    // Try preferred port, then fallback range preferred+1 .. preferred+5
+    let mut bound_port = preferred;
+    let listener = loop {
+        match tokio::net::TcpListener::bind(format!("127.0.0.1:{}", bound_port)).await {
+            Ok(l) => break l,
+            Err(e) => {
+                if bound_port < preferred + 5 {
+                    warn!("Dashboard port {} busy: {} — trying {}", bound_port, e, bound_port + 1);
+                    bound_port += 1;
+                } else {
+                    warn!("Dashboard failed to bind ports {}–{}: {}", preferred, preferred + 5, e);
+                    return;
+                }
+            }
         }
     };
-    info!("Dashboard HTTP server on port {}", port);
+
+    DASHBOARD_PORT.store(bound_port, Ordering::SeqCst);
+    DASHBOARD_RUNNING.store(true, Ordering::SeqCst);
+    info!("Dashboard HTTP server on http://127.0.0.1:{}/", bound_port);
+
+    // Spawn live_status.json writer alongside the HTTP server
+    tokio::spawn(live_status_writer(bound_port));
+
     axum::serve(listener, app).await.ok();
+    DASHBOARD_RUNNING.store(false, Ordering::SeqCst);
 }
 
 // ============================================================================
@@ -6412,11 +6630,14 @@ fn main() {
     // Start named pipe server for proxy instances
     start_pipe_server(server.tasks.clone(), server.config.clone(), runtime.handle().clone());
 
-    // Spawn HTTP dashboard alongside MCP stdio
-    runtime.spawn(start_dashboard(DashboardState {
-        tasks: server.tasks.clone(),
-        config: server.config.clone(),
-    }));
+    // Spawn HTTP dashboard alongside MCP stdio; store abort handle for dashboard_stop tool
+    {
+        let handle = runtime.spawn(start_dashboard(DashboardState {
+            tasks: server.tasks.clone(),
+            config: server.config.clone(),
+        }));
+        *DASHBOARD_ABORT.lock().unwrap() = Some(handle.abort_handle());
+    }
 
     let stdin = io::stdin();
 
@@ -7445,11 +7666,93 @@ mod tests {
 
         assert_eq!(line, "none", "empty index must return 'none', got: {}", line);
     }
+
+    // =========================================================================
+    // Tests — v1.2.8 dashboard /api/status and /api/config
+    // =========================================================================
+
+    #[test]
+    fn api_status_shape_has_required_keys() {
+        // Build a minimal in-memory AppState and call dash_api_status synchronously
+        use tokio::runtime::Runtime;
+        use tokio::sync::RwLock as TokioRwLock;
+        use std::sync::Arc;
+
+        let rt = Runtime::new().unwrap();
+        let tasks: Arc<TokioRwLock<HashMap<String, Task>>> =
+            Arc::new(TokioRwLock::new(HashMap::new()));
+        let config = Arc::new(TokioRwLock::new(ServerConfig {
+            openai_api_key: None,
+            default_gpt_model: DEFAULT_GPT_MODEL.to_string(),
+            default_working_dir: ".".to_string(),
+        }));
+
+        let state = DashboardState { tasks, config };
+
+        // Invoke the handler directly via block_on
+        let Json(v) = rt.block_on(dash_api_status(axum::extract::State(state)));
+
+        assert!(v.get("version").is_some(), "must have 'version'");
+        assert!(v.get("sessions").is_some(), "must have 'sessions'");
+        assert!(v.get("tasks").is_some(), "must have 'tasks'");
+        assert!(v.get("status_bar").is_some(), "must have 'status_bar'");
+        assert!(v.get("timestamp").is_some(), "must have 'timestamp'");
+
+        let sessions = &v["sessions"];
+        for key in &["running", "queued", "done", "failed", "orphaned", "total"] {
+            assert!(sessions.get(key).is_some(), "sessions must have '{}'", key);
+        }
+    }
+
+    #[test]
+    fn api_config_shape_has_required_keys() {
+        use tokio::runtime::Runtime;
+        let rt = Runtime::new().unwrap();
+        let Json(v) = rt.block_on(dash_api_config());
+
+        assert!(v.get("ports").is_some(), "must have 'ports'");
+        assert!(v.get("poll_intervals_ms").is_some(), "must have 'poll_intervals_ms'");
+        assert!(v.get("version").is_some(), "must have 'version'");
+
+        let ports = &v["ports"];
+        for key in &["manager", "local", "hands", "workflow", "autonomous"] {
+            assert!(ports.get(key).is_some(), "ports must have '{}'", key);
+        }
+        let intervals = &v["poll_intervals_ms"];
+        for key in &["manager", "local", "hands", "workflow", "autonomous"] {
+            assert!(intervals.get(key).is_some(), "poll_intervals_ms must have '{}'", key);
+        }
+    }
+
+    #[test]
+    fn dashboard_status_tool_reflects_globals() {
+        // Reset globals to a known state
+        DASHBOARD_PORT.store(0, Ordering::SeqCst);
+        DASHBOARD_RUNNING.store(false, Ordering::SeqCst);
+
+        let v = handle_dashboard_status();
+        assert_eq!(v["running"], false, "must be not running");
+        assert_eq!(v["port"], 0, "port must be 0 when stopped");
+        assert_eq!(v["url"].as_str().unwrap_or("x"), "", "url must be empty when stopped");
+
+        // Simulate a running dashboard on port 9100
+        DASHBOARD_PORT.store(9100, Ordering::SeqCst);
+        DASHBOARD_RUNNING.store(true, Ordering::SeqCst);
+
+        let v2 = handle_dashboard_status();
+        assert_eq!(v2["running"], true);
+        assert_eq!(v2["port"], 9100);
+        assert!(v2["url"].as_str().unwrap_or("").contains("9100"), "url must contain port");
+
+        // Cleanup
+        DASHBOARD_PORT.store(0, Ordering::SeqCst);
+        DASHBOARD_RUNNING.store(false, Ordering::SeqCst);
+    }
 }
 
 // === FILE NAVIGATION ===
-// Generated: 2026-04-15T19:55:27
-// Total: 7266 lines | 124 functions | 18 structs | 21 constants
+// Generated: 2026-04-15T20:30:13
+// Total: 7447 lines | 133 functions | 18 structs | 21 constants
 //
 // IMPORTS: axum, chrono, once_cell, serde, serde_json, std, super, sysinfo, tokio, tower_http, tracing, uuid
 //
@@ -7463,57 +7766,57 @@ mod tests {
 //   static _NODE_CMD: 84
 //   static _LOAVES_ARCHIVE_DIR: 90
 //   const fn: 93
-//   const SAFETY_VALIDATION_BLOCK: 1902
-//   const CREATE_NO_WINDOW: 4770
-//   const PIPE_NAME: 6009
-//   const LOCKFILE_EXCLUSIVE_LOCK: 6050
-//   const LOCKFILE_FAIL_IMMEDIATELY: 6051
-//   const PIPE_ACCESS_DUPLEX: 6157
-//   const PIPE_TYPE_BYTE: 6158
-//   const PIPE_READMODE_BYTE: 6159
-//   const PIPE_WAIT: 6160
-//   const PIPE_UNLIMITED_INSTANCES: 6161
-//   const LEGACY_SESSION_DIR: 6450
-//   static _SESSION_DIR: 6473
+//   const SAFETY_VALIDATION_BLOCK: 1922
+//   const CREATE_NO_WINDOW: 4843
+//   const PIPE_NAME: 6082
+//   const LOCKFILE_EXCLUSIVE_LOCK: 6123
+//   const LOCKFILE_FAIL_IMMEDIATELY: 6124
+//   const PIPE_ACCESS_DUPLEX: 6230
+//   const PIPE_TYPE_BYTE: 6231
+//   const PIPE_READMODE_BYTE: 6232
+//   const PIPE_WAIT: 6233
+//   const PIPE_UNLIMITED_INSTANCES: 6234
+//   const LEGACY_SESSION_DIR: 6523
+//   static _SESSION_DIR: 6546
 //
 // STRUCTS:
 //   JsonRpcRequest: 162-168
 //   JsonRpcSuccess: 171-175
 //   JsonRpcErrorResponse: 178-182
 //   JsonRpcError: 185-188
-//   TaskStep: 281-286
-//   Task: 289-359
-//   BackendRecommendation: 363-368
-//   WorkflowStep: 372-390
-//   WorkflowTemplate: 394-412
-//   TemplateStep: 420-425
-//   ServerConfig: 431-435
-//   Server: 437-443
-//   ParallelStepResult: 3183-3190
-//   CustomRole: 4273-4278
-//   pub RealNotifier: 4935-4936
-//   DashboardState: 5612-5615
-//   PathQuery: 5907-5909
-//   TestNotifier: 7110-7112
+//   TaskStep: 286-291
+//   Task: 294-364
+//   BackendRecommendation: 368-373
+//   WorkflowStep: 377-395
+//   WorkflowTemplate: 399-417
+//   TemplateStep: 425-430
+//   ServerConfig: 436-440
+//   Server: 442-448
+//   ParallelStepResult: 3251-3258
+//   CustomRole: 4346-4351
+//   pub RealNotifier: 5008-5009
+//   DashboardState: 5685-5688
+//   PathQuery: 5980-5982
+//   TestNotifier: 7183-7185
 //
 // ENUMS:
 //   Backend: 196-201
-//   TaskStatus: 216-223
-//   ExtractionStatus: 240-247
-//   TrustLevel: 255-259
-//   ValidationStatus: 267-272
-//   NotifyReason: 6658-6658
+//   TaskStatus: 216-227
+//   ExtractionStatus: 245-252
+//   TrustLevel: 260-264
+//   ValidationStatus: 272-277
+//   NotifyReason: 6731-6731
 //
 // IMPL BLOCKS:
 //   impl std::fmt::Display for Backend: 203-212
-//   impl std::fmt::Display for TaskStatus: 225-236
-//   impl Default for ExtractionStatus: 249-251
-//   impl Default for TrustLevel: 261-263
-//   impl Default for ValidationStatus: 274-276
-//   impl Server: 445-1091
-//   impl SessionNotifier for RealNotifier: 4937-4941
-//   impl TestNotifier: 7114-7117
-//   impl SessionNotifier for TestNotifier: 7119-7124
+//   impl std::fmt::Display for TaskStatus: 229-241
+//   impl Default for ExtractionStatus: 254-256
+//   impl Default for TrustLevel: 266-268
+//   impl Default for ValidationStatus: 279-281
+//   impl Server: 450-1111
+//   impl SessionNotifier for RealNotifier: 5010-5014
+//   impl TestNotifier: 7187-7190
+//   impl SessionNotifier for TestNotifier: 7192-7197
 //
 // FUNCTIONS:
 //   default_data_dir: 38-44
@@ -7529,116 +7832,125 @@ mod tests {
 //   loaves_dir: 110-110
 //   loaves_archive_dir: 111-111
 //   spawn_visible_terminal: 124-155
-//   default_max_retries: 278-278
-//   spawn_retry_execution: 1094-1140
-//   spawn_on_complete: 1144-1197 [med]
-//   run_gpt_task: 1203-1352 [LARGE]
-//   run_codex_task: 1356-1465 [LARGE]
-//   run_cli_task: 1466-1888 [LARGE]
-//   safe_truncate: 1895-1900
-//   ensure_safety_validation: 1904-1910
-//   extract_safety_warning: 1912-1917
-//   handle_submit_task: 1919-2247 [LARGE]
-//   handle_watch_tasks: 2251-2371 [LARGE]
-//   handle_get_status: 2373-2451 [med]
-//   handle_get_output: 2453-2485
-//   handle_list_tasks: 2487-2549 [med]
-//   handle_cancel_task: 2551-2593
-//   kill_process_tree: 2597-2632
-//   handle_task_poll: 2635-2683
-//   build_status_bar: 2686-2732
-//   read_state_file: 2735-2747
-//   read_active_loaf_summary: 2750-2758
-//   compute_task_fingerprint: 2761-2770
-//   handle_status_bar: 2773-2776
-//   handle_pause_task: 2778-2798
-//   handle_resume_task: 2800-2828
-//   handle_configure: 2830-2864
-//   handle_cleanup: 2866-2894
-//   run_workflow_step: 2900-2980 [med]
-//   handle_run_workflow: 2982-3175 [LARGE]
-//   handle_run_parallel: 3192-3341 [LARGE]
-//   run_parallel_workflow: 3344-3410 [med]
-//   launch_step: 3413-3541 [LARGE]
-//   handle_decompose_task: 3547-3625 [med]
-//   handle_save_template: 3627-3649
-//   handle_list_templates: 3651-3677
-//   handle_run_template: 3679-3725
-//   handle_explain_task: 3727-3771
-//   loaf_path: 3777-3779
-//   find_active_loaf: 3782-3801
-//   handle_loaf_create: 3803-3841
-//   handle_loaf_update: 3843-3979 [LARGE]
-//   handle_loaf_status: 3981-4020
-//   handle_loaf_close: 4022-4057
-//   handle_list_sessions: 4063-4120 [med]
-//   handle_get_analytics: 4122-4198 [med]
-//   handle_run_analyzer: 4204-4211
-//   get_role_prompt: 4217-4257
-//   list_roles: 4259-4269
-//   custom_roles_dir: 4280-4284
-//   load_custom_roles: 4286-4296
-//   get_custom_role_prompt: 4298-4303
-//   handle_role_list: 4305-4320
-//   handle_role_create: 4322-4351
-//   handle_role_delete: 4353-4363
-//   save_task_artifact: 4369-4401
-//   handle_tool_call: 4407-4455
-//   handle_review_extractions: 4461-4478
-//   handle_extract_workflow: 4480-4499
-//   handle_dismiss_extraction: 4501-4509
-//   handle_rollback_task: 4511-4517
-//   handle_retry_task: 4520-4560
-//   handle_task_rerun: 4566-4747 [LARGE]
-//   handle_route_task: 4753-4763
-//   handle_notify: 4772-4862 [med]
-//   do_notify: 4869-4927 [med]
-//   notify: 4931-4934
-//   get_tools_list: 4947-5605 [LARGE]
-//   dash_status: 5617-5632
-//   dash_status_by_id: 5634-5647
-//   dash_health: 5649-5663
-//   dash_inbox: 5665-5684
-//   flush_entry: 5686-5693
-//   dash_get_prefs: 5695-5702
-//   dash_post_prefs: 5704-5713
-//   dash_post_task: 5715-5784 [med]
-//   dash_cancel: 5786-5802
-//   dash_knowledge: 5804-5830
-//   dash_git: 5832-5844
-//   dash_system: 5846-5869
-//   dash_history: 5871-5880
-//   volumes_base_path: 5882-5886
-//   validate_volumes_path: 5889-5904
-//   api_read_file: 5911-5931
-//   api_list_dir: 5933-5964
-//   start_dashboard: 5966-6003
-//   lock_path: 6011-6013
-//   try_acquire_lock: 6017-6072 [med]
-//   run_as_proxy: 6075-6132 [med]
-//   start_pipe_server: 6136-6266 [LARGE]
-//   main: 6272-6443 [LARGE]
-//   has_session_data: 6453-6463
-//   session_dir: 6480-6482
-//   handle_start_session: 6484-6651 [LARGE]
-//   format_duration: 6660-6670
-//   fire_notify_for_session: 6672-6700
-//   check_and_fire_session_notify: 6703-6722
-//   session_heartbeat: 6725-6770
-//   handle_session_destroy: 6773-6837 [med]
-//   handle_send_to_session: 6839-6936 [med]
-//   handle_open_terminal: 6938-6993 [med]
-//   handle_gemini_direct: 6995-7014
-//   handle_codex_exec: 7016-7059
-//   handle_codex_review: 7061-7098
-//   make_meta: 7126-7140
-//   notify_on_complete_fires_on_normal_exit: 7143-7151
-//   notify_on_fail_fires_on_crash: 7154-7161
-//   notify_on_destroy_fires_on_session_destroy: 7164-7181
-//   defaults_fire_no_notify: 7184-7191
-//   custom_title_body_overrides_defaults: 7194-7206
-//   notify_survives_manager_restart_via_meta_persistence: 7209-7243
-//   test_session_dir_legacy_path_wins: 7246-7255
-//   test_session_dir_no_legacy_falls_through: 7258-7265
+//   default_max_retries: 283-283
+//   spawn_retry_execution: 1114-1160
+//   spawn_on_complete: 1164-1217 [med]
+//   run_gpt_task: 1223-1372 [LARGE]
+//   run_codex_task: 1376-1485 [LARGE]
+//   run_cli_task: 1486-1908 [LARGE]
+//   safe_truncate: 1915-1920
+//   ensure_safety_validation: 1924-1930
+//   extract_safety_warning: 1932-1937
+//   handle_submit_task: 1939-2267 [LARGE]
+//   handle_watch_tasks: 2271-2391 [LARGE]
+//   handle_get_status: 2393-2472 [med]
+//   handle_get_output: 2474-2506
+//   handle_list_tasks: 2508-2570 [med]
+//   handle_cancel_task: 2572-2614
+//   kill_process_tree: 2618-2653
+//   handle_task_poll: 2656-2704
+//   build_status_bar: 2707-2729
+//   read_breadcrumb_status_line: 2736-2739
+//   read_breadcrumb_status_line_from: 2743-2800 [med]
+//   read_state_file: 2803-2815
+//   read_active_loaf_summary: 2818-2826
+//   compute_task_fingerprint: 2829-2838
+//   handle_status_bar: 2841-2844
+//   handle_pause_task: 2846-2866
+//   handle_resume_task: 2868-2896
+//   handle_configure: 2898-2932
+//   handle_cleanup: 2934-2962
+//   run_workflow_step: 2968-3048 [med]
+//   handle_run_workflow: 3050-3243 [LARGE]
+//   handle_run_parallel: 3260-3409 [LARGE]
+//   run_parallel_workflow: 3412-3478 [med]
+//   launch_step: 3481-3609 [LARGE]
+//   handle_decompose_task: 3615-3693 [med]
+//   handle_save_template: 3695-3717
+//   handle_list_templates: 3719-3745
+//   handle_run_template: 3747-3793
+//   handle_explain_task: 3795-3839
+//   loaf_path: 3845-3847
+//   find_active_loaf: 3850-3869
+//   handle_loaf_create: 3871-3909
+//   handle_loaf_update: 3911-4047 [LARGE]
+//   handle_loaf_status: 4049-4088
+//   handle_loaf_close: 4090-4125
+//   handle_list_sessions: 4131-4193 [med]
+//   handle_get_analytics: 4195-4271 [med]
+//   handle_run_analyzer: 4277-4284
+//   get_role_prompt: 4290-4330
+//   list_roles: 4332-4342
+//   custom_roles_dir: 4353-4357
+//   load_custom_roles: 4359-4369
+//   get_custom_role_prompt: 4371-4376
+//   handle_role_list: 4378-4393
+//   handle_role_create: 4395-4424
+//   handle_role_delete: 4426-4436
+//   save_task_artifact: 4442-4474
+//   handle_tool_call: 4480-4528
+//   handle_review_extractions: 4534-4551
+//   handle_extract_workflow: 4553-4572
+//   handle_dismiss_extraction: 4574-4582
+//   handle_rollback_task: 4584-4590
+//   handle_retry_task: 4593-4633
+//   handle_task_rerun: 4639-4820 [LARGE]
+//   handle_route_task: 4826-4836
+//   handle_notify: 4845-4935 [med]
+//   do_notify: 4942-5000 [med]
+//   notify: 5004-5007
+//   get_tools_list: 5020-5678 [LARGE]
+//   dash_status: 5690-5705
+//   dash_status_by_id: 5707-5720
+//   dash_health: 5722-5736
+//   dash_inbox: 5738-5757
+//   flush_entry: 5759-5766
+//   dash_get_prefs: 5768-5775
+//   dash_post_prefs: 5777-5786
+//   dash_post_task: 5788-5857 [med]
+//   dash_cancel: 5859-5875
+//   dash_knowledge: 5877-5903
+//   dash_git: 5905-5917
+//   dash_system: 5919-5942
+//   dash_history: 5944-5953
+//   volumes_base_path: 5955-5959
+//   validate_volumes_path: 5962-5977
+//   api_read_file: 5984-6004
+//   api_list_dir: 6006-6037
+//   start_dashboard: 6039-6076
+//   lock_path: 6084-6086
+//   try_acquire_lock: 6090-6145 [med]
+//   run_as_proxy: 6148-6205 [med]
+//   start_pipe_server: 6209-6339 [LARGE]
+//   main: 6345-6516 [LARGE]
+//   has_session_data: 6526-6536
+//   session_dir: 6553-6555
+//   handle_start_session: 6557-6724 [LARGE]
+//   format_duration: 6733-6743
+//   fire_notify_for_session: 6745-6773
+//   check_and_fire_session_notify: 6776-6795
+//   session_heartbeat: 6798-6843
+//   handle_session_destroy: 6846-6910 [med]
+//   handle_send_to_session: 6912-7009 [med]
+//   handle_open_terminal: 7011-7066 [med]
+//   handle_gemini_direct: 7068-7087
+//   handle_codex_exec: 7089-7132
+//   handle_codex_review: 7134-7171
+//   make_meta: 7199-7213
+//   notify_on_complete_fires_on_normal_exit: 7216-7224
+//   notify_on_fail_fires_on_crash: 7227-7234
+//   notify_on_destroy_fires_on_session_destroy: 7237-7254
+//   defaults_fire_no_notify: 7257-7264
+//   custom_title_body_overrides_defaults: 7267-7279
+//   notify_survives_manager_restart_via_meta_persistence: 7282-7316
+//   test_session_dir_legacy_path_wins: 7319-7328
+//   test_session_dir_no_legacy_falls_through: 7331-7338
+//   classify_on_restart: 7347-7368
+//   session_alive_at_restart_becomes_orphaned: 7371-7376
+//   session_dead_at_restart_becomes_failed: 7379-7384
+//   non_session_alive_at_restart_stays_running: 7387-7392
+//   breadcrumb_status_line_single_entry: 7395-7414
+//   breadcrumb_status_line_multi_entry: 7417-7434
+//   breadcrumb_status_line_empty_index: 7437-7446
 //
 // === END FILE NAVIGATION ===
