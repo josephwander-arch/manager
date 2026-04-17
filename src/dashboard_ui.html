@@ -220,42 +220,6 @@ body.no-services .panel-body { max-height: 520px; }
 }
 .session-card.selected { border-color: var(--accent-blue); background: var(--bg-card-hover); }
 
-
-/* Detail takeover -- click card, right panel swaps content */
-.detail-view { display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
-.detail-view .detail-body {
-  font-size: 12px;
-  line-height: 1.65;
-  color: var(--text-primary);
-  white-space: pre-wrap;
-  word-break: break-word;
-  padding: 6px 2px;
-}
-.detail-view .detail-meta {
-  font-size: 11px;
-  color: var(--text-secondary);
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.panel-header .close-detail-btn {
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  margin-left: 8px;
-}
-.panel-header .close-detail-btn:hover {
-  color: var(--text-primary);
-  border-color: var(--accent-blue);
-}
-.session-card.selected { border-color: var(--accent-blue); background: var(--bg-card-hover); }
-
 /* Tool calls feed */
 .tool-calls-feed { display: flex; flex-direction: column; gap: 2px; }
 .tc-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; border-bottom: 1px solid rgba(45,49,64,0.5); }
@@ -296,6 +260,18 @@ body.no-services .panel-body { max-height: 520px; }
   border-color: var(--accent-amber) !important;
   animation: stall-pulse 2s infinite;
 }
+
+/* Current tool call pulse */
+@keyframes tc-pulse {
+  0%, 100% { border-color: rgba(59,130,246,0.6); background: rgba(59,130,246,0.06); }
+  50%      { border-color: rgba(59,130,246,0.25); background: rgba(59,130,246,0.02); }
+}
+.tc-row.tc-current {
+  border: 1px solid rgba(59,130,246,0.5);
+  border-radius: 4px;
+  padding: 3px 4px;
+  animation: tc-pulse 2s ease-in-out infinite;
+}
 </style>
 </head>
 <body class="view-full">
@@ -318,7 +294,7 @@ body.no-services .panel-body { max-height: 520px; }
   <div class="tab-group">
     <button class="tab active" onclick="setView('full')">Full</button>
     <button class="tab" onclick="setView('ops')">Ops</button>
-    <button class="tab" onclick="setView('summary')">Summary</button>
+    <button class="tab" onclick="setView('summary')">News</button>
   </div>
   <label class="group-toggle"><input type="checkbox" id="groupByProject" onchange="renderAll()"> Group by project</label>
   <div class="filter-group">
@@ -346,7 +322,7 @@ body.no-services .panel-body { max-height: 520px; }
   <div id="panels-row">
     <div class="panel">
       <div class="panel-header">
-        <span>Sessions &amp; Tasks</span>
+        <span>Sessions</span>
         <span id="session-count" style="font-size:10px;color:var(--text-secondary)"></span>
       </div>
       <div class="panel-body" id="sessions-panel"></div>
@@ -414,7 +390,7 @@ body.no-services .panel-body { max-height: 520px; }
     <div class="zone-body" id="zone-loafs-body"><span style="color:var(--text-secondary)">—</span></div>
   </div>
   <div class="zone-card">
-    <div class="zone-title">Active Breadcrumb</div>
+    <div class="zone-title">Active Breadcrumbs</div>
     <div class="zone-body" id="zone-breadcrumb-body"><span style="color:var(--text-secondary)">—</span></div>
   </div>
   <div class="zone-card">
@@ -422,8 +398,8 @@ body.no-services .panel-body { max-height: 520px; }
     <div class="zone-body" id="zone-completed-body"><span style="color:var(--text-secondary)">—</span></div>
   </div>
   <div class="zone-card">
-    <div class="zone-title">Autonomous Pulse</div>
-    <div class="zone-body" id="zone-pulse-body"><span style="color:var(--text-secondary)">—</span></div>
+    <div class="zone-title">Last 6 Tools</div>
+    <div class="zone-body" id="zone-tools-body"><span style="color:var(--text-secondary)">—</span></div>
   </div>
 </div>
 
@@ -471,8 +447,6 @@ async function boot() {
   }
   startPolling();
   setInterval(updateElapsedTimers, 1000);
-  // Tool Calls Feed removed 2026-04-16: it was overwriting the session-detail panel
-  // every 8s. The function body is kept as dead code for archaeology but never called.
 }
 
 function startPolling() {
@@ -501,7 +475,6 @@ function trackFail(name) {
 }
 
 async function pollServer(name, url, intervalMs) {
-  if (!intervalMs || intervalMs < 1000) intervalMs = 5000;  // guard: undefined or pathologically small → 5s default
   if (!intervalMs || intervalMs < 1000) intervalMs = 5000;  // guard: undefined or pathologically small → 5s default
   async function doFetch() {
     try {
@@ -666,7 +639,15 @@ function renderSessions() {
       stallMeta = '· <span style="color:var(--accent-amber)">⚠ stalled</span>';
     }
 
-    const stepsInfo = t.progress_lines ? `${t.progress_lines} lines` : '';
+    // Steps / activity info — inline step reporting
+    let stepsInfo = '';
+    if (t.current_step != null && t.total_steps != null && t.total_steps > 0) {
+      const stepDesc = t.current_step_desc ? `: ${t.current_step_desc}` : '';
+      const linesNote = t.progress_lines ? ` · ${t.progress_lines} lines` : '';
+      stepsInfo = `Step ${t.current_step}/${t.total_steps}${stepDesc}${linesNote}`;
+    } else if (t.progress_lines) {
+      stepsInfo = `${t.progress_lines} output lines`;
+    }
 
     // Label chip
     let labelChipHtml = '';
@@ -677,7 +658,7 @@ function renderSessions() {
       labelChipHtml = `<div class="session-label-chip" style="background:${color}22;color:${color};border-color:${color}55">${escHtml(t.label)}</div>`;
     }
 
-    // Step progress bar
+    // Step progress bar (from manager's [STEP n/N] parser or breadcrumb data)
     let stepProgressHtml = '';
     if (t.current_step != null && t.total_steps != null && t.total_steps > 0) {
       const pct = Math.round(t.current_step / t.total_steps * 100);
@@ -685,6 +666,12 @@ function renderSessions() {
       stepProgressHtml = `<div class="step-progress">
         <div class="step-progress-bar"><div class="step-progress-fill" style="width:${pct}%"></div></div>
         <div class="step-progress-label">${t.current_step}/${t.total_steps}${desc}</div>
+      </div>`;
+    } else if (t.status === 'running' && t.progress_lines > 0) {
+      // No discrete steps but task is active — show activity indicator
+      stepProgressHtml = `<div class="step-progress">
+        <div class="step-progress-bar"><div class="step-progress-fill" style="width:100%;opacity:0.3;background:var(--accent-blue)"></div></div>
+        <div class="step-progress-label">${t.progress_lines} output lines · active</div>
       </div>`;
     }
 
@@ -741,66 +728,10 @@ function renderSessions() {
   updateElapsedTimers();
 }
 
-// ============================================================
-// Tool Calls Feed (aggregate from ports 9100-9103)
-// ============================================================
-async function aggregateToolCalls() {
-  if (_detailMode) return;
-  if (_detailMode) return;
-  const cfg = state.config;
-  const ports = cfg
-    ? [cfg.ports.manager, cfg.ports.local, cfg.ports.hands, cfg.ports.workflow]
-    : [9100, 9101, 9102, 9103];
-
-  const results = await Promise.allSettled(
-    ports.map(p =>
-      fetch(`http://127.0.0.1:${p}/api/status`, { signal: AbortSignal.timeout(3000) })
-        .then(r => r.ok ? r.json() : null)
-        .catch(() => null)
-    )
-  );
-
-  const allCalls = [];
-  results.forEach(r => {
-    if (r.status === 'fulfilled' && r.value?.recent_tool_calls) {
-      allCalls.push(...r.value.recent_tool_calls);
-    }
-  });
-
-  // Dedupe by tool_name + timestamp_utc
-  const seen = new Set();
-  const deduped = allCalls.filter(c => {
-    const key = `${c.tool_name}|${c.timestamp_utc}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
-  // Sort descending by timestamp
-  deduped.sort((a, b) => new Date(b.timestamp_utc) - new Date(a.timestamp_utc));
-  const top12 = deduped.slice(0, 12);
-
-  const panel = document.getElementById('tool-calls-panel');
-  const countEl = document.getElementById('tc-count');
-
-  if (top12.length === 0) {
-    panel.innerHTML = '<div class="empty-state">No tool calls recorded</div>';
-    countEl.textContent = '';
-    return;
-  }
-
-  countEl.textContent = `${top12.length} recent`;
-  panel.innerHTML = `<div class="tool-calls-feed">${top12.map(c => {
-    const t = new Date(c.timestamp_utc);
-    const timeStr = isNaN(t.getTime()) ? '' : t.toLocaleTimeString();
-    const durStr = c.duration_ms != null ? `${c.duration_ms}ms` : '';
-    return `<div class="tc-row">
-      <span class="tc-name" title="${escHtml(c.tool_name)}">${escHtml(c.tool_name)}</span>
-      ${durStr ? `<span class="tc-dur">${durStr}</span>` : ''}
-      <span class="tc-meta">${timeStr}</span>
-    </div>`;
-  }).join('')}</div>`;
-}
+// aggregateToolCalls() — removed 2026-04-17: replaced by inline Last 5 Tools
+// widget in renderBottomStrip() Zone 4. Tool call data is now aggregated
+// from state.servers[*].recent_tool_calls (already polled) instead of
+// making separate fetch calls.
 
 // ============================================================
 // Bottom strip (4 zones)
@@ -822,27 +753,48 @@ function renderBottomStrip() {
     loafBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">No active loaf</span>';
   }
 
-  // Zone 2: Active Breadcrumb (from local)
+  // Zone 2: Active Breadcrumbs (from local, fallback to manager status_bar)
+  // v1.3.4: widget already iterates all actives; added explicit sort newest-first
   const bcBody = document.getElementById('zone-breadcrumb-body');
   if (ldata?.breadcrumbs) {
     const bcs2 = Array.isArray(ldata.breadcrumbs) ? ldata.breadcrumbs : (ldata.breadcrumbs.active ?? []);
-    const active = bcs2.filter(b => !b.aborted && (b.current_step ?? b.steps_completed ?? 0) < (b.total_steps ?? 0));
+    const active = bcs2.filter(b => !b.aborted && (b.current_step ?? b.steps_completed ?? 0) < (b.total_steps ?? 0))
+      .sort((a, b) => {
+        // Newest first by started_at (or created_at fallback)
+        const aT = new Date(a.started_at || a.created_at || 0).getTime();
+        const bT = new Date(b.started_at || b.created_at || 0).getTime();
+        return bT - aT;
+      });
     if (active.length > 0) {
-      const b = active[0];
-      const cur = b.current_step ?? b.steps_completed ?? 0;
-      const tot = b.total_steps ?? 0;
-      const pct = tot > 0 ? Math.round(cur / tot * 100) : 0;
-      bcBody.innerHTML = `<div style="font-size:11px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(b.name||b.id)}">${escHtml(b.name||b.id)}</div>
-        <div class="bc-progress-bar" style="margin:4px 0 2px"><div class="bc-progress-fill" style="width:${pct}%"></div></div>
-        <div style="font-size:10px;color:var(--text-secondary)">${cur}/${tot} steps · ${pct}%</div>`;
+      bcBody.innerHTML = active.map(b => {
+        const cur = b.current_step ?? b.steps_completed ?? 0;
+        const tot = b.total_steps ?? 0;
+        const pct = tot > 0 ? Math.round(cur / tot * 100) : 0;
+        // Time since start
+        let timeSince = '';
+        const startedAt = b.started_at || b.created_at;
+        if (startedAt) {
+          const ms = Date.now() - new Date(startedAt).getTime();
+          if (!isNaN(ms) && ms > 0) timeSince = fmtDuration(ms);
+        }
+        // Last step result — truncated to 80 chars
+        const lastResult = b.last_step_result || b.last_step || '';
+        const truncResult = lastResult.length > 80 ? lastResult.slice(0, 77) + '...' : lastResult;
+        return `<div style="margin-bottom:4px">
+          <div style="font-size:11px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(b.name||b.id)}">${escHtml(b.name||b.id)}</div>
+          <div class="bc-progress-bar" style="margin:3px 0 2px"><div class="bc-progress-fill" style="width:${pct}%"></div></div>
+          <div style="font-size:10px;color:var(--text-secondary)">step ${cur}/${tot} · ${pct}%${timeSince ? ` · ${timeSince}` : ''}</div>
+          ${truncResult ? `<div style="font-size:10px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(lastResult)}">${escHtml(truncResult)}</div>` : ''}
+        </div>`;
+      }).join('');
     } else {
-      bcBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">No active breadcrumb</span>';
+      bcBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px;opacity:0.5">No active operation</span>';
     }
   } else if (mdata?.status_bar?.breadcrumb && mdata.status_bar.breadcrumb !== 'none') {
     bcBody.innerHTML = `<div style="font-size:11px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(mdata.status_bar.breadcrumb)}</div>
       <div style="font-size:10px;color:var(--text-secondary)">From manager status_bar</div>`;
   } else {
-    bcBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">—</span>';
+    bcBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px;opacity:0.5">No active operation</span>';
   }
 
   // Zone 3: Completed Today (last 3 from local breadcrumb history)
@@ -865,18 +817,53 @@ function renderBottomStrip() {
     compBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">—</span>';
   }
 
-  // Zone 4: Autonomous Pulse
-  const pulseBody = document.getElementById('zone-pulse-body');
-  if (!adata || adata._error) {
-    pulseBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px;font-style:italic">autonomous HTTP offline (port 9104)</span>';
+  // Zone 4: Last 6 Tools (aggregated from all polled servers)
+  const toolsBody = document.getElementById('zone-tools-body');
+  const allCalls = [];
+  for (const [sname, sdata] of Object.entries(state.servers)) {
+    if (sdata?.recent_tool_calls) {
+      sdata.recent_tool_calls.forEach(c => allCalls.push({...c, _server: sname}));
+    }
+  }
+  const seenTc = new Set();
+  const dedupedTc = allCalls.filter(c => {
+    const key = `${c.tool_name}|${c.timestamp_utc}`;
+    if (seenTc.has(key)) return false;
+    seenTc.add(key);
+    return true;
+  });
+  dedupedTc.sort((a, b) => new Date(b.timestamp_utc) - new Date(a.timestamp_utc));
+  const top6 = dedupedTc.slice(0, 6);
+
+  if (top6.length === 0) {
+    toolsBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px;font-style:italic">No tool calls yet</span>';
   } else {
-    const reminders = adata.reminders_due_today_count ?? adata.reminders_pending ?? '—';
-    const pendingExt = adata.pending_extractions_count ?? adata.pending_extractions ?? '—';
-    const lastExt = adata.last_extraction_at ? fmtTime(adata.last_extraction_at) : '—';
-    const remColor = (reminders !== '—' && reminders > 0) ? 'var(--accent-amber)' : 'var(--text-primary)';
-    pulseBody.innerHTML = `<div style="font-size:11px;color:var(--text-secondary)">Reminders due: <span style="color:${remColor}">${reminders}</span></div>
-      <div style="font-size:11px;color:var(--text-secondary)">Pending extracts: <span style="color:var(--text-primary)">${pendingExt}</span></div>
-      <div style="font-size:11px;color:var(--text-secondary)">Last extract: <span style="color:var(--text-primary)">${lastExt}</span></div>`;
+    const nowMs = Date.now();
+    toolsBody.innerHTML = top6.map((c, idx) => {
+      const ts = new Date(c.timestamp_utc);
+      // Relative timestamp
+      let relTime = '';
+      if (!isNaN(ts.getTime())) {
+        const ago = Math.floor((nowMs - ts.getTime()) / 1000);
+        relTime = ago < 5 ? 'now' : ago < 60 ? `${ago}s` : ago < 3600 ? `${Math.floor(ago/60)}m` : `${Math.floor(ago/3600)}h`;
+      }
+      const durStr = c.duration_ms != null ? `${c.duration_ms}ms` : '';
+      // Input preview — first 20 chars of input/arguments
+      const inputRaw = c.input_preview || c.input || (c.arguments ? JSON.stringify(c.arguments).slice(0,20) : '');
+      const inputPrev = inputRaw.length > 20 ? inputRaw.slice(0, 17) + '...' : inputRaw;
+      // Currently executing: first entry with no duration (still running)
+      const isCurrent = idx === 0 && c.duration_ms == null;
+      const rowClass = isCurrent ? 'tc-row tc-current' : 'tc-row';
+      const statusIcon = c.duration_ms != null ? (c.error ? '<span style="color:var(--accent-red)">&#10007;</span>' : '<span style="color:var(--accent-green)">&#10003;</span>') : '<span style="color:var(--accent-blue)">&#9654;</span>';
+      return `<div class="${rowClass}">
+        <span style="color:var(--text-secondary);font-size:10px;min-width:24px;text-align:right">${relTime}</span>
+        <span style="color:var(--accent-purple);font-size:9px;min-width:44px">${escHtml(c._server)}</span>
+        <span class="tc-name" title="${escHtml(c.tool_name)}">${escHtml(c.tool_name)}</span>
+        ${inputPrev ? `<span style="color:var(--text-secondary);font-size:9px;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(inputRaw)}">${escHtml(inputPrev)}</span>` : ''}
+        ${durStr ? `<span class="tc-dur">${durStr}</span>` : ''}
+        ${statusIcon}
+      </div>`;
+    }).join('');
   }
 }
 
@@ -889,21 +876,33 @@ function renderScorecard() {
   const ldata = state.servers.local;
 
   const sessions = mdata?.sessions || {};
+  const adata = state.servers.autonomous;
   const running = sessions.running || 0;
   const done = sessions.done || 0;
   const failed = sessions.failed || 0;
   const orphaned = sessions.orphaned || 0;
-  const oldBins = ldata?.health?.old_binaries ?? [];
-  const exeOld = Array.isArray(oldBins) ? oldBins.length : (ldata?.exe_old_count ?? '—');
-  const extractions = mdata?.extractions_today ?? ldata?.extractions_today ?? '—';
+
+  // Extractions today — prefer autonomous, fallback to manager/local
+  const extractions = adata?.extractions_today ?? mdata?.extractions_today ?? ldata?.extractions_today ?? 0;
+
+  // Breadcrumbs completed today — from local breadcrumb data
+  let bcCompleteToday = 0;
+  if (ldata?.breadcrumbs) {
+    const bcAll = Array.isArray(ldata.breadcrumbs) ? ldata.breadcrumbs : (ldata.breadcrumbs.completed ?? ldata.breadcrumbs.active ?? []);
+    const todayStr = new Date().toISOString().slice(0, 10);
+    bcCompleteToday = bcAll.filter(b => {
+      const cd = b.completed_at || b.completion_date || '';
+      return cd.startsWith(todayStr) && !b.aborted;
+    }).length;
+  }
 
   const items = [
     { label: 'Running', value: running, cls: running > 0 ? 'good' : '' },
     { label: 'Done today', value: done, cls: done > 0 ? 'good' : '' },
     { label: 'Failed', value: failed, cls: failed > 0 ? 'warn' : '' },
     { label: 'Orphaned', value: orphaned, cls: orphaned > 0 ? 'warn' : '' },
-    { label: 'Extractions', value: extractions, cls: '' },
-    { label: '.exe.old', value: exeOld, cls: exeOld > 0 ? 'warn' : '' },
+    { label: 'Extractions', value: extractions, cls: extractions > 0 ? 'good' : '' },
+    { label: 'BC Complete', value: bcCompleteToday, cls: bcCompleteToday > 0 ? 'good' : '' },
   ];
 
   grid.innerHTML = items.map(i =>

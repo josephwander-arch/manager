@@ -526,6 +526,18 @@ struct Task {
     pub live_activity: Option<Vec<ActivityEntry>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    // v1.3.1: task-level notify flags (mirrors session notify)
+    // v1.3.2 (Opus review): skip_serializing_if on bools for JSON cleanliness
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_on_complete: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_on_fail: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_on_destroy: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_body: Option<String>,
 }
 
 /// Item 16: Task routing intelligence — recommends the best backend for a prompt.
@@ -639,6 +651,9 @@ impl Server {
 
         // Load any persisted tasks
         let mut tasks = HashMap::new();
+        // v1.3.3 (Opus review B1): collect IDs of tasks marked Failed during recovery
+        // so we can fire notify after the notifier exists (post-Server-construction).
+        let mut recovery_failed_ids: Vec<String> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(tasks_dir()) {
             for entry in entries.flatten() {
                 if entry.path().extension().map_or(false, |e| e == "json") {
@@ -695,15 +710,40 @@ impl Server {
                                         task.watchdog_observations.push(obs2);
                                     }
                                 } else if task.child_pid.is_some() {
-                                    // Child is confirmed dead with no result — now it's fair to mark failed
-                                    let obs2 = format!(
-                                        "[{}] Child PID {} is dead — marking task as failed",
-                                        Utc::now().format("%H:%M:%S"),
-                                        task.child_pid.unwrap()
-                                    );
-                                    task.watchdog_observations.push(obs2);
-                                    task.status = TaskStatus::Failed;
-                                    task.error = Some("Child process exited without reporting result (manager restarted)".into());
+                                    // v1.3.5: Before marking Failed, check if task file was recently written.
+                                    // If mtime < 10min ago, task may have completed silently just before manager restart.
+                                    // Mark Orphaned in that case (no auto-fail notify, user can investigate).
+                                    let task_file = format!("{}\\{}.json", tasks_dir(), task.id);
+                                    let recently_written = std::fs::metadata(&task_file)
+                                        .and_then(|m| m.modified())
+                                        .ok()
+                                        .and_then(|mtime| mtime.elapsed().ok())
+                                        .map(|elapsed| elapsed.as_secs() < 600)
+                                        .unwrap_or(false);
+                                    if recently_written {
+                                        let obs2 = format!(
+                                            "[{}] Child PID {} is dead BUT task file was written in last 10 min — marking Orphaned (not Failed) for manual review",
+                                            Utc::now().format("%H:%M:%S"),
+                                            task.child_pid.unwrap()
+                                        );
+                                        task.watchdog_observations.push(obs2);
+                                        task.status = TaskStatus::Orphaned;
+                                        Server::persist_task(&task);
+                                        // Do NOT queue for notify — ambiguous state
+                                    } else {
+                                        let obs2 = format!(
+                                            "[{}] Child PID {} is dead and task file is stale (>10min) — marking task as failed",
+                                            Utc::now().format("%H:%M:%S"),
+                                            task.child_pid.unwrap()
+                                        );
+                                        task.watchdog_observations.push(obs2);
+                                        task.status = TaskStatus::Failed;
+                                        task.error = Some("Child process exited without reporting result (manager restarted)".into());
+                                        Server::persist_task(&task);
+                                        if !is_session {
+                                            recovery_failed_ids.push(task.id.clone());
+                                        }
+                                    }
                                 } else {
                                     // No child_pid stored — legacy task from before PID tracking.
                                     // Cannot verify liveness across manager restart, mark failed.
@@ -714,6 +754,11 @@ impl Server {
                                     task.watchdog_observations.push(obs2);
                                     task.status = TaskStatus::Failed;
                                     task.error = Some("Legacy task without PID tracking — cannot verify liveness across manager restart".into());
+                                    Server::persist_task(&task);
+                                    // v1.3.3: queue for notify after notifier exists
+                                    if !is_session {
+                                        recovery_failed_ids.push(task.id.clone());
+                                    }
                                 }
                             }
                             tasks.insert(task.id.clone(), task);
@@ -721,6 +766,26 @@ impl Server {
                     }
                 }
             }
+        }
+
+        // v1.3.3 (Opus review B1): fire notify for tasks marked Failed during recovery.
+        // Notifier wasn't available during the load loop above, but we can use RealNotifier
+        // directly here since that's what the Server struct would have anyway.
+        // Only fires for tasks that had notify_on_fail: true.
+        // v1.3.5: fire notifies in a background thread so PowerShell subprocess doesn't block
+        // MCP init handshake (was causing Claude Desktop to kill manager on restart).
+        if !recovery_failed_ids.is_empty() {
+            let recovery_tasks: Vec<Task> = recovery_failed_ids
+                .iter()
+                .filter_map(|id| tasks.get(id).cloned())
+                .collect();
+            std::thread::spawn(move || {
+                for task in &recovery_tasks {
+                    check_and_fire_task_notify(task, &RealNotifier);
+                    // v1.3.4: auto-advance loaf phase if task was linked to current phase
+                    auto_advance_loaf_on_task_complete(task);
+                }
+            });
         }
 
         Server {
@@ -1018,15 +1083,29 @@ impl Server {
 
     /// Item 3: Generate smart end report. Success = summary. Failure = step trail.
     fn generate_end_report(task: &Task) -> String {
+        // v1.3.2: Char-boundary-safe slice — walk back from len-500 to the nearest valid UTF-8 char boundary
+        // so multi-byte chars (em-dashes, arrows, curly quotes) in task output don't panic slicing.
+        fn safe_tail(s: &str, max_chars: usize) -> &str {
+            if s.chars().count() <= max_chars {
+                return s;
+            }
+            // Find the byte index that leaves approximately max_chars from the end
+            let skip = s.chars().count() - max_chars;
+            match s.char_indices().nth(skip) {
+                Some((byte_idx, _)) => &s[byte_idx..],
+                None => s,
+            }
+        }
+
         match task.status {
             TaskStatus::Done => {
-                // Success: last 500 chars of output as summary
+                // Success: last ~500 chars of output as summary (char-safe)
                 let out = &task.output;
                 if out.len() > 500 {
                     format!(
                         "âœ“ Task completed ({} steps)\n\n{}",
                         task.steps.len(),
-                        &out[out.len() - 500..]
+                        safe_tail(out, 500)
                     )
                 } else {
                     format!("âœ“ Task completed ({} steps)\n\n{}", task.steps.len(), out)
@@ -1215,6 +1294,11 @@ impl Server {
             current_step_desc: None,
             live_activity: None,
             effort: new_effort,
+            notify_on_complete: None,
+            notify_on_fail: None,
+            notify_on_destroy: None,
+            notify_title: None,
+            notify_body: None,
         };
 
         // Note on original task
@@ -1643,6 +1727,11 @@ fn spawn_on_complete(
         current_step_desc: None,
         live_activity: None,
         effort: None,
+        notify_on_complete: None,
+        notify_on_fail: None,
+        notify_on_destroy: None,
+        notify_title: None,
+        notify_body: None,
     };
 
     info!(
@@ -1714,6 +1803,10 @@ async fn run_gpt_task(
                 }
                 Server::persist_task(task);
                 Server::save_to_history(task);
+                // v1.3.2 (Opus review): fire task notify on early-exit before lock release
+                check_and_fire_task_notify(task, &RealNotifier);
+        // v1.3.4: auto-advance loaf phase if task was linked to current phase
+        auto_advance_loaf_on_task_complete(task);
             }
             if let Some(ref rt) = retry_task {
                 store.insert(rt.id.clone(), rt.clone());
@@ -1817,6 +1910,10 @@ async fn run_gpt_task(
         Server::persist_task(task);
         Server::save_to_history(task);
         save_task_artifact(task);
+        // v1.3.1: task notify
+        check_and_fire_task_notify(task, &RealNotifier);
+        // v1.3.4: auto-advance loaf phase if task was linked to current phase
+        auto_advance_loaf_on_task_complete(task);
         completed_snap = Some(task.clone());
     }
     if let Some(ref rt) = retry_task {
@@ -1983,6 +2080,10 @@ async fn run_codex_task(
         Server::persist_task(task);
         Server::save_to_history(task);
         save_task_artifact(task);
+        // v1.3.1: task notify
+        check_and_fire_task_notify(task, &RealNotifier);
+        // v1.3.4: auto-advance loaf phase if task was linked to current phase
+        auto_advance_loaf_on_task_complete(task);
         completed_snap = Some(task.clone());
     }
     if let Some(ref rt) = retry_task {
@@ -2078,6 +2179,10 @@ async fn run_cli_task(
                 retry_task = Server::prepare_retry(task);
                 Server::persist_task(task);
                 Server::save_to_history(task);
+                // v1.3.1: task notify
+                check_and_fire_task_notify(task, &RealNotifier);
+        // v1.3.4: auto-advance loaf phase if task was linked to current phase
+        auto_advance_loaf_on_task_complete(task);
             }
             if let Some(ref rt) = retry_task {
                 store.insert(rt.id.clone(), rt.clone());
@@ -2585,6 +2690,10 @@ async fn run_cli_task(
         Server::persist_task(task);
         Server::save_to_history(task);
         save_task_artifact(task);
+        // v1.3.1: task notify
+        check_and_fire_task_notify(task, &RealNotifier);
+        // v1.3.4: auto-advance loaf phase if task was linked to current phase
+        auto_advance_loaf_on_task_complete(task);
         completed_snap = Some(task.clone());
     }
     if let Some(ref rt) = retry_task {
@@ -2688,6 +2797,19 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
     let working_dir_for_fp = params.get("working_dir").and_then(|v| v.as_str());
     let fp = compute_task_fingerprint(&backend, &raw_prompt, working_dir_for_fp);
 
+    // v1.3.1: Task-level notify flags
+    let notify_on_complete = params.get("notify_on_complete").and_then(|v| v.as_bool());
+    let notify_on_fail = params.get("notify_on_fail").and_then(|v| v.as_bool());
+    let notify_on_destroy = params.get("notify_on_destroy").and_then(|v| v.as_bool());
+    let notify_title = params
+        .get("notify_title")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let notify_body = params
+        .get("notify_body")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     if !allow_duplicate {
         let store = server.runtime.block_on(server.tasks.read());
         let match_task = store.values().find(|t| {
@@ -2750,14 +2872,27 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
         })
         .unwrap_or_default();
 
+    // v1.3.1: backend-aware progress directive — Claude Code has TodoWrite native,
+    // other backends need explicit "track your progress" language.
+    // Breadcrumb calls preserved for ClaudeCode to keep CPC cross-session coordination.
+    let progress_directive = match backend {
+        Backend::ClaudeCode => {
+            "- Track progress via TodoWrite (native). \
+             Call autonomous:breadcrumb_start/_step/_complete for CPC cross-session coordination.\n"
+        }
+        _ => {
+            "- Track your progress: note what you're doing at each major step.\n\
+             - On failure, document what failed and why before exiting.\n"
+        }
+    };
+
     let prompt = ensure_safety_validation(&format!(
         "[CPC DELEGATION CONTEXT]\n\
          {}\
-         - Track your progress: note what you're doing at each major step.\n\
+         {}\
          - When done, summarize: decisions made, files changed, patterns discovered.\n\
-         - On failure, document what failed and why before exiting.\n\
          - If you discover something reusable (a fix, a pattern, a decision), call it out clearly.\n\n\
-         [TASK]\n{}", loaf_context, raw_prompt
+         [TASK]\n{}", loaf_context, progress_directive, raw_prompt
     ));
 
     // §12: Specialist role handling — custom YAML roles override built-in
@@ -2866,6 +3001,11 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
         current_step_desc: None,
         live_activity: None,
         effort: effort.clone(),
+        notify_on_complete,
+        notify_on_fail,
+        notify_on_destroy,
+        notify_title,
+        notify_body,
     };
 
     // Store task
@@ -3464,6 +3604,17 @@ fn handle_cancel_task(server: &Server, params: Value) -> Result<Value, String> {
     // Item 18: no retry for cancelled tasks
     Server::persist_task(task);
     Server::save_to_history(task);
+    // v1.3.1: notify_on_destroy for task cancel
+    if task.notify_on_destroy.unwrap_or(false) {
+        fire_notify_for_task(
+            &task.id,
+            &task.created_at,
+            task.notify_title.as_deref(),
+            task.notify_body.as_deref(),
+            NotifyReason::Destroyed,
+            server.notifier.as_ref(),
+        );
+    }
 
     Ok(json!({
         "task_id": task_id,
@@ -4373,6 +4524,11 @@ fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
         current_step_desc: None,
         live_activity: None,
         effort: None,
+        notify_on_complete: None,
+        notify_on_fail: None,
+        notify_on_destroy: None,
+        notify_title: None,
+        notify_body: None,
     };
     rt.block_on(async {
         server.tasks.write().await.insert(wf_id.clone(), wf_task);
@@ -5064,6 +5220,101 @@ fn find_active_loaf() -> Option<(String, Value)> {
         }
     }
     best.map(|(id, v, _)| (id, v))
+}
+
+/// v1.3.4: Auto-advance loaf phase when a task linked to the current phase completes Done.
+///
+/// A task is linked to a phase if its prompt (after CPC DELEGATION CONTEXT injection) contains
+/// "Phase: {phase_name}" matching the loaf's current phase at the time of task submission.
+///
+/// This is best-effort: only fires when status==Done (failures do not advance); silent if no loaf
+/// or no match. Phases list gets the current phase marked status=done and current_phase index++.
+/// If already on the last phase, marks the whole loaf status=completed.
+fn auto_advance_loaf_on_task_complete(task: &Task) {
+    if task.status != TaskStatus::Done {
+        return;
+    }
+    let (loaf_id, loaf) = match find_active_loaf() {
+        Some(pair) => pair,
+        None => return,
+    };
+    let phase_idx = loaf
+        .get("current_phase")
+        .and_then(|p| p.as_u64())
+        .unwrap_or(0) as usize;
+    let phases = match loaf.get("phases").and_then(|p| p.as_array()) {
+        Some(p) => p.clone(),
+        None => return,
+    };
+    let current_phase_name = match phases
+        .get(phase_idx)
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+    {
+        Some(n) => n.to_string(),
+        None => return,
+    };
+    // Match: task's prompt must have been injected with the current phase marker.
+    // loaf_context produces: "Phase: {phase_name}." so we look for that.
+    let marker = format!("Phase: {}.", current_phase_name);
+    if !task.prompt.contains(&marker) {
+        return;
+    }
+    // Read-modify-write the loaf file.
+    let path = loaf_path(&loaf_id);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("auto_advance_loaf: read failed {}: {}", loaf_id, e);
+            return;
+        }
+    };
+    let mut loaf_live: Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("auto_advance_loaf: parse failed {}: {}", loaf_id, e);
+            return;
+        }
+    };
+    let phases_mut = match loaf_live
+        .get_mut("phases")
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(p) => p,
+        None => return,
+    };
+    if let Some(phase_obj) = phases_mut.get_mut(phase_idx).and_then(|p| p.as_object_mut()) {
+        phase_obj.insert("status".into(), json!("done"));
+        phase_obj.insert("completed_at".into(), json!(Utc::now().to_rfc3339()));
+        phase_obj.insert("completed_by_task".into(), json!(task.id));
+    }
+    let total_phases = phases_mut.len();
+    let next_idx = phase_idx + 1;
+    if next_idx < total_phases {
+        // Mark next phase active
+        if let Some(next_phase) = phases_mut.get_mut(next_idx).and_then(|p| p.as_object_mut()) {
+            next_phase.insert("status".into(), json!("active"));
+        }
+        loaf_live["current_phase"] = json!(next_idx);
+    } else {
+        // Was on final phase — mark whole loaf completed
+        loaf_live["status"] = json!("completed");
+        loaf_live["completed_at"] = json!(Utc::now().to_rfc3339());
+    }
+    // Append breadcrumb event for audit trail
+    if let Some(bc_arr) = loaf_live.get_mut("breadcrumbs").and_then(|b| b.as_array_mut()) {
+        bc_arr.push(json!({
+            "timestamp": Utc::now().to_rfc3339(),
+            "event": format!("Phase '{}' auto-advanced on task {} complete", current_phase_name, task.id),
+        }));
+    }
+    match std::fs::write(&path, serde_json::to_string_pretty(&loaf_live).unwrap_or_default()) {
+        Ok(_) => info!(
+            "auto_advance_loaf: {} phase '{}' → done (task {})",
+            loaf_id, current_phase_name, task.id
+        ),
+        Err(e) => warn!("auto_advance_loaf: write failed {}: {}", loaf_id, e),
+    }
 }
 
 fn handle_loaf_create(_server: &Server, params: Value) -> Result<Value, String> {
@@ -6258,6 +6509,11 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
         current_step_desc: None,
         live_activity: None,
         effort: None,
+        notify_on_complete: None,
+        notify_on_fail: None,
+        notify_on_destroy: None,
+        notify_title: None,
+        notify_body: None,
     };
 
     // Store and persist
@@ -6563,6 +6819,11 @@ try {
 /// Abstraction over the toast notification backend. Allows TestNotifier in unit tests.
 pub trait SessionNotifier: Send + Sync + 'static {
     fn notify(&self, title: &str, body: &str) -> Result<(), String>;
+    /// v1.3.5: notify with explicit icon (info/warning/error). Default impl delegates to notify()
+    /// for backward-compat with TestNotifier and any external implementations.
+    fn notify_with_icon(&self, title: &str, body: &str, _icon: &str) -> Result<(), String> {
+        self.notify(title, body)
+    }
 }
 
 /// Production notifier — fires real Windows toast via PowerShell.
@@ -6571,6 +6832,9 @@ pub struct RealNotifier;
 impl SessionNotifier for RealNotifier {
     fn notify(&self, title: &str, body: &str) -> Result<(), String> {
         do_notify(title, body, "info", 5000)
+    }
+    fn notify_with_icon(&self, title: &str, body: &str, icon: &str) -> Result<(), String> {
+        do_notify(title, body, icon, 5000)
     }
 }
 
@@ -6641,7 +6905,12 @@ fn get_tools_list() -> Value {
                             "type": "string",
                             "enum": ["low", "medium", "high", "max"],
                             "description": "Effort level for Claude Code tasks. Default: medium. Auto-escalated on retry."
-                        }
+                        },
+                        "notify_on_complete": {"type": "boolean", "description": "Fire a Windows toast notification when the task completes successfully. Default false."},
+                        "notify_on_fail": {"type": "boolean", "description": "Fire a Windows toast notification when the task fails (crash, non-zero exit). Default false."},
+                        "notify_on_destroy": {"type": "boolean", "description": "Fire a Windows toast notification when task_cancel is called on this task. Default false."},
+                        "notify_title": {"type": "string", "description": "Custom notification title. If omitted, auto-generated from task state."},
+                        "notify_body": {"type": "string", "description": "Custom notification body. If omitted, auto-generated from task state."}
                     },
                     "required": ["prompt"]
                 }
@@ -7534,6 +7803,11 @@ async fn dash_post_task(
         current_step_desc: None,
         live_activity: None,
         effort: None,
+        notify_on_complete: None,
+        notify_on_fail: None,
+        notify_on_destroy: None,
+        notify_title: None,
+        notify_body: None,
     };
     {
         let mut store = st.tasks.write().await;
@@ -7626,6 +7900,17 @@ async fn dash_cancel(
             // Item 18: no retry for cancelled tasks
             Server::persist_task(task);
             Server::save_to_history(task);
+            // v1.3.1: notify_on_destroy for dashboard cancel
+            if task.notify_on_destroy.unwrap_or(false) {
+                fire_notify_for_task(
+                    &task.id,
+                    &task.created_at,
+                    task.notify_title.as_deref(),
+                    task.notify_body.as_deref(),
+                    NotifyReason::Destroyed,
+                    &RealNotifier,
+                );
+            }
             (
                 StatusCode::OK,
                 Json(json!({"task_id": id, "status": "cancelled"})),
@@ -8373,6 +8658,11 @@ async fn api_register_external_task(
         current_step_desc: None,
         live_activity: None,
         effort: None,
+        notify_on_complete: None,
+        notify_on_fail: None,
+        notify_on_destroy: None,
+        notify_title: None,
+        notify_body: None,
     };
 
     let mut store = st.tasks.write().await;
@@ -8383,7 +8673,10 @@ async fn api_register_external_task(
 }
 
 async fn start_dashboard(state: DashboardState) {
-    // Port priority: CPC_DASHBOARD_PORT → CPC_MANAGER_PORT → default 9100
+    // Port priority: CPC_DASHBOARD_PORT → CPC_MANAGER_PORT → default 9200
+    // v1.3.4: moved default from 9100 to 9200 because ports 9100-9105 are owned by other MCP servers
+    // (local=9101, hands=9102, workflow=9103, autonomous=9104). Manager kept falling through to 9105
+    // which confused dashboard bookmarks. 9200 is clean and manager-dedicated.
     let preferred: u16 = std::env::var("CPC_DASHBOARD_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -8392,7 +8685,7 @@ async fn start_dashboard(state: DashboardState) {
                 .ok()
                 .and_then(|p| p.parse().ok())
         })
-        .unwrap_or(9100);
+        .unwrap_or(9200);
 
     // Step 12.6: stall watchdog timeout (default 600s = 10 min)
     let stall_timeout_secs: u64 = std::env::var("MANAGER_STALL_TIMEOUT_SECS")
@@ -9181,6 +9474,11 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
                 current_step_desc: None,
                 live_activity: None,
                 effort: effort.clone(),
+                notify_on_complete: None,
+                notify_on_fail: None,
+                notify_on_destroy: None,
+                notify_title: None,
+                notify_body: None,
             },
         );
     }
@@ -9284,9 +9582,23 @@ fn fire_notify_for_session(
             format!("{} was manually destroyed", session_id),
         ),
     };
-    let title = notify_title_override.unwrap_or(&default_title);
-    let body = notify_body_override.unwrap_or(&default_body);
-    if let Err(e) = notifier.notify(title, body) {
+    // v1.3.5: only honor user-supplied title/body for Completed (same logic as fire_notify_for_task)
+    let (title, body) = match reason {
+        NotifyReason::Completed => (
+            notify_title_override.unwrap_or(&default_title),
+            notify_body_override.unwrap_or(&default_body),
+        ),
+        NotifyReason::Failed | NotifyReason::Destroyed => (
+            default_title.as_str(),
+            default_body.as_str(),
+        ),
+    };
+    let icon = match reason {
+        NotifyReason::Completed => "info",
+        NotifyReason::Failed => "error",
+        NotifyReason::Destroyed => "warning",
+    };
+    if let Err(e) = notifier.notify_with_icon(title, body, icon) {
         eprintln!("[manager] notify failed for session {}: {}", session_id, e);
     }
 }
@@ -9327,6 +9639,88 @@ fn check_and_fire_session_notify(
             created_at,
             title_ov,
             body_ov,
+            NotifyReason::Failed,
+            notifier,
+        );
+    }
+}
+
+/// v1.3.1: Fire a toast notification for a task event.
+fn fire_notify_for_task(
+    task_id: &str,
+    created_at: &DateTime<Utc>,
+    notify_title_override: Option<&str>,
+    notify_body_override: Option<&str>,
+    reason: NotifyReason,
+    notifier: &dyn SessionNotifier,
+) {
+    let elapsed = Utc::now().signed_duration_since(*created_at);
+    let mins = elapsed.num_minutes();
+    let secs = elapsed.num_seconds() % 60;
+    let duration = if mins > 0 {
+        format!("{}m {}s", mins, secs)
+    } else {
+        format!("{}s", secs)
+    };
+    let (default_title, default_body) = match reason {
+        NotifyReason::Completed => (
+            "Task complete".to_string(),
+            format!("Task {} finished in {}", task_id, duration),
+        ),
+        NotifyReason::Failed => (
+            "Task failed".to_string(),
+            format!("Task {} failed after {}", task_id, duration),
+        ),
+        NotifyReason::Destroyed => (
+            "Task cancelled".to_string(),
+            format!("Task {} was cancelled", task_id),
+        ),
+    };
+    // v1.3.5: only honor user-supplied title/body for Completed. For Failed/Destroyed, use defaults
+    // (user's custom label was set expecting success; applying it to failure is misleading).
+    let (title, body) = match reason {
+        NotifyReason::Completed => (
+            notify_title_override.unwrap_or(&default_title),
+            notify_body_override.unwrap_or(&default_body),
+        ),
+        NotifyReason::Failed | NotifyReason::Destroyed => (
+            default_title.as_str(),
+            default_body.as_str(),
+        ),
+    };
+    // v1.3.5: pick icon per reason so failed tasks show [Error] instead of [Info]
+    let icon = match reason {
+        NotifyReason::Completed => "info",
+        NotifyReason::Failed => "error",
+        NotifyReason::Destroyed => "warning",
+    };
+    if let Err(e) = notifier.notify_with_icon(title, body, icon) {
+        eprintln!("[manager] notify failed for task {}: {}", task_id, e);
+    }
+}
+
+/// v1.3.1: Check task notify flags and fire as appropriate. Extracted for unit-testability.
+fn check_and_fire_task_notify(task: &Task, notifier: &dyn SessionNotifier) {
+    let exit_was_normal = matches!(task.status, TaskStatus::Done);
+    let notify_complete = task.notify_on_complete.unwrap_or(false);
+    let notify_fail = task.notify_on_fail.unwrap_or(false);
+
+    if notify_complete && exit_was_normal {
+        fire_notify_for_task(
+            &task.id,
+            &task.created_at,
+            task.notify_title.as_deref(),
+            task.notify_body.as_deref(),
+            NotifyReason::Completed,
+            notifier,
+        );
+    }
+    if notify_fail && !exit_was_normal {
+        fire_notify_for_task(
+            &task.id,
+            &task.created_at,
+            task.notify_title.as_deref(),
+            task.notify_body.as_deref(),
             NotifyReason::Failed,
             notifier,
         );
@@ -9683,6 +10077,11 @@ fn handle_send_to_session(server: &Server, args: Value) -> Result<Value, String>
                 current_step_desc: None,
                 live_activity: None,
                 effort: None,
+                notify_on_complete: None,
+                notify_on_fail: None,
+                notify_on_destroy: None,
+                notify_title: None,
+                notify_body: None,
             },
         );
     }
@@ -10110,6 +10509,169 @@ mod tests {
 
         // Cleanup
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // --- v1.3.1: Task-level notify tests ---
+
+    /// Build a minimal Task with optional notify overrides for testing.
+    fn make_task(status: TaskStatus, overrides: serde_json::Value) -> Task {
+        let mut t = Task {
+            id: "tsk_test01".into(),
+            backend: Backend::ClaudeCode,
+            prompt: "test prompt".into(),
+            system_prompt: None,
+            model: None,
+            working_dir: None,
+            status,
+            output: String::new(),
+            error: None,
+            created_at: Utc::now() - chrono::Duration::seconds(30),
+            started_at: None,
+            completed_at: Some(Utc::now()),
+            progress_lines: 0,
+            steps: Vec::new(),
+            last_activity: None,
+            last_output_chunk_at: None,
+            stall_detected: false,
+            extraction_status: ExtractionStatus::None,
+            trust_score: 0,
+            trust_level: TrustLevel::Low,
+            rollback_path: None,
+            validation_status: ValidationStatus::NotChecked,
+            assertions: Vec::new(),
+            backed_up_files: Vec::new(),
+            retry_count: 0,
+            max_retries: 2,
+            retry_of: None,
+            error_context: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0.0,
+            on_complete: None,
+            role: None,
+            save_artifact: false,
+            rerun_of: None,
+            parent_task_id: None,
+            forked_from: None,
+            continuation_of: None,
+            child_pid: None,
+            watchdog_observations: Vec::new(),
+            fingerprint: None,
+            superseded_by: None,
+            label: None,
+            current_step: None,
+            total_steps: None,
+            current_step_desc: None,
+            live_activity: None,
+            effort: None,
+            notify_on_complete: None,
+            notify_on_fail: None,
+            notify_on_destroy: None,
+            notify_title: None,
+            notify_body: None,
+        };
+        if let Value::Object(flags) = overrides {
+            for (k, v) in flags {
+                match k.as_str() {
+                    "notify_on_complete" => t.notify_on_complete = v.as_bool(),
+                    "notify_on_fail" => t.notify_on_fail = v.as_bool(),
+                    "notify_on_destroy" => t.notify_on_destroy = v.as_bool(),
+                    "notify_title" => t.notify_title = v.as_str().map(String::from),
+                    "notify_body" => t.notify_body = v.as_str().map(String::from),
+                    _ => {}
+                }
+            }
+        }
+        t
+    }
+
+    #[test]
+    fn notify_on_complete_fires_on_normal_exit_for_task() {
+        let n = TestNotifier::new();
+        let task = make_task(TaskStatus::Done, json!({"notify_on_complete": true}));
+        check_and_fire_task_notify(&task, &n);
+        let calls = n.recorded();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].0.contains("complete"),
+            "title should contain 'complete': {:?}",
+            calls[0].0
+        );
+        assert!(
+            calls[0].1.contains("tsk_test01"),
+            "body should contain task id"
+        );
+    }
+
+    #[test]
+    fn notify_on_fail_fires_on_task_crash() {
+        let n = TestNotifier::new();
+        let task = make_task(TaskStatus::Failed, json!({"notify_on_fail": true}));
+        check_and_fire_task_notify(&task, &n);
+        let calls = n.recorded();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].0.contains("failed"),
+            "title should contain 'failed': {:?}",
+            calls[0].0
+        );
+    }
+
+    #[test]
+    fn notify_on_destroy_fires_on_task_cancel() {
+        let n = TestNotifier::new();
+        let task = make_task(TaskStatus::Cancelled, json!({"notify_on_destroy": true}));
+        // Simulate the cancel path
+        if task.notify_on_destroy.unwrap_or(false) {
+            fire_notify_for_task(
+                &task.id,
+                &task.created_at,
+                task.notify_title.as_deref(),
+                task.notify_body.as_deref(),
+                NotifyReason::Destroyed,
+                &n,
+            );
+        }
+        let calls = n.recorded();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].0.contains("cancelled"),
+            "title should contain 'cancelled': {:?}",
+            calls[0].0
+        );
+    }
+
+    #[test]
+    fn defaults_fire_no_notify_for_task() {
+        let n = TestNotifier::new();
+        // All flags absent (None → unwrap_or(false))
+        let done_task = make_task(TaskStatus::Done, json!({}));
+        let failed_task = make_task(TaskStatus::Failed, json!({}));
+        check_and_fire_task_notify(&done_task, &n);
+        check_and_fire_task_notify(&failed_task, &n);
+        assert_eq!(
+            n.recorded().len(),
+            0,
+            "no flags set — no notifications expected"
+        );
+    }
+
+    #[test]
+    fn custom_title_body_overrides_for_task() {
+        let n = TestNotifier::new();
+        let task = make_task(
+            TaskStatus::Done,
+            json!({
+                "notify_on_complete": true,
+                "notify_title": "Build Done",
+                "notify_body": "Your build finished"
+            }),
+        );
+        check_and_fire_task_notify(&task, &n);
+        let calls = n.recorded();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "Build Done");
+        assert_eq!(calls[0].1, "Your build finished");
     }
 
     #[test]

@@ -2,6 +2,59 @@
 
 All notable changes to the Manager MCP Server are documented here.
 
+## [1.3.5] - 2026-04-17
+
+### Fixed
+
+- **Less-liberal restart recovery** — Dead-child tasks whose file was written within 10 minutes are now marked `Orphaned` (not `Failed`), avoiding false failure notifications after clean manager restarts.
+- **Notification label override scoped to success** — `notify_title`/`notify_body` overrides now only apply to `Completed` notifications. `Failed`/`Destroyed` always use default labels so users aren't misled by a success-oriented custom message.
+- **Per-reason notification icons** — Failed tasks now show `[Error]` and cancelled tasks show `[Warning]` instead of the generic `[Info]` icon. New `notify_with_icon` trait method with backward-compatible default.
+- **Recovery notify no longer blocks MCP init** — PowerShell toast subprocesses during restart recovery are now spawned in a background thread, preventing Claude Desktop from killing the manager during the init handshake.
+- **Restart-recovery persists status to disk** — Previously, when restart-recovery marked a task as Orphaned or Failed, only the in-memory state was updated; the JSON file on disk still showed "running". On next restart, manager would re-read "running", redo the transition, and re-fire the notify toast, producing a notify-storm on every restart for any failed task. Now `persist_task()` is called immediately after each recovery status transition so the on-disk state matches memory.
+
+## [1.3.4] - 2026-04-17
+
+### Added
+
+- **Loaf auto-advance on task complete** — When a task transitions to `Done` and its prompt contains the injected `Phase: {name}.` marker matching the active loaf's current phase, the phase is automatically marked `done` (with `completed_at` + `completed_by_task`) and `current_phase` increments. If the completed phase was the last one, the whole loaf is marked `completed`. Append-only breadcrumb events record every auto-advance for audit trail. New helper: `auto_advance_loaf_on_task_complete(task)`. Wired at all 6 task-completion sites (GPT normal/early-exit, Codex normal, CLI normal, CLI spawn-fail, recovery). Only fires on `Done` — failures never advance phases.
+
+### Changed
+
+- **Dashboard default port moved from 9100 to 9200** — Other MCP servers (local=9101, hands=9102, workflow=9103, autonomous=9104) were stealing ports 9101-9104, causing manager to fall through to 9105 and confusing dashboard bookmarks. 9200 is clean and manager-dedicated. `CPC_DASHBOARD_PORT` and `CPC_MANAGER_PORT` env vars still override.
+- **Dashboard: "Active Breadcrumb" widget renamed to "Active Breadcrumbs"** — The widget already iterated over all active breadcrumbs (via `.map(b => ...)`), but the singular label made it look like a single-item widget. Also added explicit newest-first sort by `started_at`/`created_at`.
+
+### Fixed
+
+- None (v1.3.3 held up cleanly overnight; this release is features + cleanup)
+
+## [1.3.3] - 2026-04-17
+
+### Added
+
+- **Restart-recovery task notify (Opus review B1)** — When `Server::new()` marks a task Failed during startup recovery (child PID dead, or legacy task with no PID tracking), the task's `notify_on_fail` flag is now respected. Task IDs marked Failed during recovery are collected into a Vec; after Server construction, the fire loop iterates and calls `check_and_fire_task_notify` using `RealNotifier` directly. Sessions are excluded — session notify still flows through `check_and_fire_session_notify` per the existing session recovery path. Closes the edge case flagged by Opus: manager restart while a notify-flagged task was running no longer produces silent failure.
+
+## [1.3.2] - 2026-04-17
+
+### Fixed
+
+- **CRITICAL: UTF-8 panic in `generate_end_report`** — `task_status` panicked when a task's output contained a multi-byte UTF-8 character (em-dash, arrow, curly quote) at byte offset `len - 500`. Raw byte slice `&out[out.len() - 500..]` at `src/main.rs:1040` could land mid-codepoint. Replaced with a `safe_tail()` helper that walks char boundaries via `char_indices().nth(skip)`. `task_status` on any task with a 500+ character output containing common Unicode characters near the tail now works correctly.
+
+- **BUG (Opus review): Missing notify on GPT early-exit path** — When `OPENAI_API_KEY` is missing and a GPT task fails during its initialization, the task was correctly marked Failed but `check_and_fire_task_notify` was never called. A user submitting `notify_on_fail: true` on a GPT task with no API key configured would get silent failure. Added the missing notify call in `run_gpt_task` after persist+save_to_history.
+
+### Changed
+
+- **Cosmetic (Opus review): serde `skip_serializing_if` on task notify bool fields** — The three `Option<bool>` notify fields in the Task struct (`notify_on_complete`, `notify_on_fail`, `notify_on_destroy`) now use `skip_serializing_if = "Option::is_none"` to match the `Option<String>` notify fields. Tasks without notify flags no longer serialize `"notify_on_complete": null` noise to persisted JSON and dashboard API.
+
+## [1.3.1] - 2026-04-17
+
+### Added
+
+- **Notification hooks on `task_submit`** — The five notify flags (`notify_on_complete`, `notify_on_fail`, `notify_on_destroy`, `notify_title`, `notify_body`) that were previously only available on `session_start` are now also accepted by `task_submit`. When set, a Windows toast notification fires when the task transitions to Done or Failed. Matches the session notification pattern from v1.2.6, extended to background tasks.
+
+### Changed
+
+- **Backend-aware delegation prompt injection** — The CPC delegation context prepended to every task now adapts per backend. Claude Code tasks receive a shorter directive referencing TodoWrite (native) and explicit autonomous breadcrumb calls, since Claude Code's native TodoWrite tool already tracks per-step progress. Other backends (GPT, Gemini, Codex) continue to receive the original full directive. Net effect: ~3-7% faster Claude Code task execution with no loss of downstream report quality or CPC breadcrumb coordination.
+
 ## [1.3.0] - 2026-04-16
 
 ### Fixed
