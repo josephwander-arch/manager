@@ -40,7 +40,8 @@ impl BackendMetrics {
         let n = self.durations_ms.len();
         if n > 0 {
             self.p50_duration_ms = self.durations_ms[n / 2];
-            self.p95_duration_ms = self.durations_ms[(n as f64 * 0.95) as usize].min(*self.durations_ms.last().unwrap());
+            self.p95_duration_ms = self.durations_ms[(n as f64 * 0.95) as usize]
+                .min(*self.durations_ms.last().unwrap());
         }
     }
 }
@@ -56,12 +57,22 @@ pub fn run_analyzer(volumes_path: &str, history_path: &str) -> Result<Value, Str
     let seven_days_ago = now - Duration::days(7);
     let fourteen_days_ago = now - Duration::days(14);
 
-    let recent: Vec<&Value> = history.iter()
-        .filter(|e| parse_created_at(e).map(|dt| dt >= seven_days_ago).unwrap_or(false))
+    let recent: Vec<&Value> = history
+        .iter()
+        .filter(|e| {
+            parse_created_at(e)
+                .map(|dt| dt >= seven_days_ago)
+                .unwrap_or(false)
+        })
         .collect();
 
-    let prev_week: Vec<&Value> = history.iter()
-        .filter(|e| parse_created_at(e).map(|dt| dt >= fourteen_days_ago && dt < seven_days_ago).unwrap_or(false))
+    let prev_week: Vec<&Value> = history
+        .iter()
+        .filter(|e| {
+            parse_created_at(e)
+                .map(|dt| dt >= fourteen_days_ago && dt < seven_days_ago)
+                .unwrap_or(false)
+        })
         .collect();
 
     let current_metrics = compute_metrics(&recent);
@@ -71,7 +82,8 @@ pub fn run_analyzer(volumes_path: &str, history_path: &str) -> Result<Value, Str
     // --- Inflection detection: success rate dropped ≥15% WoW ---
     for (backend, metrics) in &current_metrics {
         if let Some(prev) = prev_metrics.get(backend) {
-            if prev.total >= 3 && metrics.total >= 3
+            if prev.total >= 3
+                && metrics.total >= 3
                 && prev.success_rate > 0.0
                 && metrics.success_rate < prev.success_rate - 0.15
             {
@@ -97,9 +109,15 @@ pub fn run_analyzer(volumes_path: &str, history_path: &str) -> Result<Value, Str
     // --- Promotion detection: backend Y outperforms default for task class Z ---
     let task_type_metrics = compute_by_task_type(&recent);
     for (task_type, backend_map) in &task_type_metrics {
-        if backend_map.len() < 2 { continue; }
+        if backend_map.len() < 2 {
+            continue;
+        }
         let mut sorted: Vec<(&String, &BackendMetrics)> = backend_map.iter().collect();
-        sorted.sort_by(|a, b| b.1.success_rate.partial_cmp(&a.1.success_rate).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            b.1.success_rate
+                .partial_cmp(&a.1.success_rate)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         if let (Some(best), Some(runner)) = (sorted.first(), sorted.get(1)) {
             if best.1.total >= 3 && best.1.success_rate >= runner.1.success_rate + 0.20 {
@@ -126,7 +144,9 @@ pub fn run_analyzer(volumes_path: &str, history_path: &str) -> Result<Value, Str
     // --- Cost anomaly: backend cost spiked ≥50% WoW ---
     for (backend, metrics) in &current_metrics {
         if let Some(prev) = prev_metrics.get(backend) {
-            if prev.total >= 3 && metrics.total >= 3 && prev.avg_cost > 0.001
+            if prev.total >= 3
+                && metrics.total >= 3
+                && prev.avg_cost > 0.001
                 && metrics.avg_cost > prev.avg_cost * 1.5
             {
                 proposals.push(json!({
@@ -147,7 +167,10 @@ pub fn run_analyzer(volumes_path: &str, history_path: &str) -> Result<Value, Str
 
     // --- Write proposals ---
     let date_str = now.format("%Y-%m-%d").to_string();
-    let proposals_path = format!("{}\\inbox\\manager_analyzer_proposals_{}.md", volumes_path, date_str);
+    let proposals_path = format!(
+        "{}\\inbox\\manager_analyzer_proposals_{}.md",
+        volumes_path, date_str
+    );
 
     let report = build_report(&current_metrics, &proposals, &date_str, recent.len());
 
@@ -172,14 +195,14 @@ pub fn run_analyzer(volumes_path: &str, history_path: &str) -> Result<Value, Str
 // ============================================================================
 
 fn load_history(path: &str) -> Result<Vec<Value>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read history: {}", e))?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse history: {}", e))
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read history: {}", e))?;
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse history: {}", e))
 }
 
 fn parse_created_at(entry: &Value) -> Option<DateTime<Utc>> {
-    entry.get("created_at")
+    entry
+        .get("created_at")
         .and_then(|v| v.as_str())
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc))
@@ -189,29 +212,47 @@ fn compute_metrics(tasks: &[&Value]) -> HashMap<String, BackendMetrics> {
     let mut map: HashMap<String, BackendMetrics> = HashMap::new();
 
     for task in tasks {
-        let backend = task.get("backend").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+        let backend = task
+            .get("backend")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
         let status = task.get("status").and_then(|v| v.as_str()).unwrap_or("");
-        let duration_ms = task.get("duration_secs").and_then(|v| v.as_i64()).map(|s| (s * 1000) as u64);
+        let duration_ms = task
+            .get("duration_secs")
+            .and_then(|v| v.as_i64())
+            .map(|s| (s * 1000) as u64);
         let cost = task.get("cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
         let m = map.entry(backend).or_default();
         m.total += 1;
-        if status == "done" { m.successful += 1; }
+        if status == "done" {
+            m.successful += 1;
+        }
         if status == "failed" {
             m.failed += 1;
-            let error = task.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let error = task
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let category = categorize_error(error);
             *m.failure_categories.entry(category).or_insert(0) += 1;
         }
-        if let Some(d) = duration_ms { m.durations_ms.push(d); }
+        if let Some(d) = duration_ms {
+            m.durations_ms.push(d);
+        }
         m.total_cost += cost;
 
         // Detect retries by checking step_count or retry_of field
         let step_count = task.get("step_count").and_then(|v| v.as_u64()).unwrap_or(0);
-        if step_count > 5 { m.retry_count += 1; } // heuristic: many steps = likely retry
+        if step_count > 5 {
+            m.retry_count += 1;
+        } // heuristic: many steps = likely retry
     }
 
-    for m in map.values_mut() { m.finalize(); }
+    for m in map.values_mut() {
+        m.finalize();
+    }
     map
 }
 
@@ -232,7 +273,11 @@ fn compute_by_task_type(tasks: &[&Value]) -> HashMap<String, HashMap<String, Bac
 }
 
 fn classify_task_type(task: &Value) -> String {
-    let prompt = task.get("prompt_summary").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+    let prompt = task
+        .get("prompt_summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
     if prompt.contains("build") || prompt.contains("cargo") || prompt.contains("compile") {
         "build".to_string()
     } else if prompt.contains("fix") || prompt.contains("bug") || prompt.contains("error") {
@@ -243,7 +288,10 @@ fn classify_task_type(task: &Value) -> String {
         "test".to_string()
     } else if prompt.contains("deploy") || prompt.contains("release") || prompt.contains("ship") {
         "deploy".to_string()
-    } else if prompt.contains("research") || prompt.contains("investigate") || prompt.contains("explore") {
+    } else if prompt.contains("research")
+        || prompt.contains("investigate")
+        || prompt.contains("explore")
+    {
         "research".to_string()
     } else {
         "general".to_string()
@@ -276,17 +324,20 @@ fn top_n_keys(map: &HashMap<String, u32>, n: usize) -> Vec<String> {
 }
 
 fn metrics_to_json(metrics: &HashMap<String, BackendMetrics>) -> Value {
-    let entries: Vec<Value> = metrics.iter().map(|(backend, m)| {
-        json!({
-            "backend": backend,
-            "total_tasks": m.total,
-            "success_rate": format!("{:.1}%", m.success_rate * 100.0),
-            "p50_duration_secs": format!("{:.1}", m.p50_duration_ms as f64 / 1000.0),
-            "p95_duration_secs": format!("{:.1}", m.p95_duration_ms as f64 / 1000.0),
-            "avg_cost_usd": format!("${:.4}", m.avg_cost),
-            "retry_rate": format!("{:.1}%", m.retry_rate * 100.0),
+    let entries: Vec<Value> = metrics
+        .iter()
+        .map(|(backend, m)| {
+            json!({
+                "backend": backend,
+                "total_tasks": m.total,
+                "success_rate": format!("{:.1}%", m.success_rate * 100.0),
+                "p50_duration_secs": format!("{:.1}", m.p50_duration_ms as f64 / 1000.0),
+                "p95_duration_secs": format!("{:.1}", m.p95_duration_ms as f64 / 1000.0),
+                "avg_cost_usd": format!("${:.4}", m.avg_cost),
+                "retry_rate": format!("{:.1}%", m.retry_rate * 100.0),
+            })
         })
-    }).collect();
+        .collect();
     json!(entries)
 }
 
@@ -306,22 +357,40 @@ fn build_report(
     for (backend, m) in metrics {
         out.push_str(&format!(
             "| {} | {} | {:.1}% | {:.1}s | {:.1}s | ${:.4} | {:.1}% |\n",
-            backend, m.total, m.success_rate * 100.0,
-            m.p50_duration_ms as f64 / 1000.0, m.p95_duration_ms as f64 / 1000.0,
-            m.avg_cost, m.retry_rate * 100.0
+            backend,
+            m.total,
+            m.success_rate * 100.0,
+            m.p50_duration_ms as f64 / 1000.0,
+            m.p95_duration_ms as f64 / 1000.0,
+            m.avg_cost,
+            m.retry_rate * 100.0
         ));
     }
 
     if proposals.is_empty() {
-        out.push_str("\n## Proposals\n\nNo proposals generated — all metrics within normal ranges.\n");
+        out.push_str(
+            "\n## Proposals\n\nNo proposals generated — all metrics within normal ranges.\n",
+        );
     } else {
         out.push_str(&format!("\n## Proposals ({})\n\n", proposals.len()));
         for (i, p) in proposals.iter().enumerate() {
             let ptype = p.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
             let severity = p.get("severity").and_then(|v| v.as_str()).unwrap_or("info");
-            let rec = p.get("recommendation").and_then(|v| v.as_str()).unwrap_or("");
-            let marker = match severity { "warning" => "⚠️", _ => "ℹ️" };
-            out.push_str(&format!("### {}. {} [{}] {}\n\n", i + 1, marker, ptype, severity));
+            let rec = p
+                .get("recommendation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let marker = match severity {
+                "warning" => "⚠️",
+                _ => "ℹ️",
+            };
+            out.push_str(&format!(
+                "### {}. {} [{}] {}\n\n",
+                i + 1,
+                marker,
+                ptype,
+                severity
+            ));
             out.push_str(&format!("{}\n\n", rec));
         }
     }
@@ -339,7 +408,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn make_task(backend: &str, status: &str, created_at: &str, duration_secs: i64, error: Option<&str>) -> Value {
+    fn make_task(
+        backend: &str,
+        status: &str,
+        created_at: &str,
+        duration_secs: i64,
+        error: Option<&str>,
+    ) -> Value {
         let mut v = json!({
             "task_id": format!("task_{}", uuid::Uuid::new_v4()),
             "backend": backend,
@@ -351,7 +426,9 @@ mod tests {
             "cost_usd": 0.05,
         });
         if let Some(e) = error {
-            v.as_object_mut().unwrap().insert("error".to_string(), json!(e));
+            v.as_object_mut()
+                .unwrap()
+                .insert("error".to_string(), json!(e));
         }
         v
     }
@@ -363,12 +440,28 @@ mod tests {
         let prev_date = (now - Duration::days(10)).to_rfc3339();
 
         // Previous week: 10 tasks, 9 success (90%)
-        let mut history: Vec<Value> = (0..9).map(|_| make_task("claude_code", "done", &prev_date, 60, None)).collect();
-        history.push(make_task("claude_code", "failed", &prev_date, 30, Some("timeout")));
+        let mut history: Vec<Value> = (0..9)
+            .map(|_| make_task("claude_code", "done", &prev_date, 60, None))
+            .collect();
+        history.push(make_task(
+            "claude_code",
+            "failed",
+            &prev_date,
+            30,
+            Some("timeout"),
+        ));
 
         // Current week: 10 tasks, 5 success (50%) — 40% drop
         history.extend((0..5).map(|_| make_task("claude_code", "done", &recent_date, 60, None)));
-        history.extend((0..5).map(|_| make_task("claude_code", "failed", &recent_date, 30, Some("build failure"))));
+        history.extend((0..5).map(|_| {
+            make_task(
+                "claude_code",
+                "failed",
+                &recent_date,
+                30,
+                Some("build failure"),
+            )
+        }));
 
         let tmp = std::env::temp_dir().join("test_analyzer_history.json");
         std::fs::write(&tmp, serde_json::to_string(&history).unwrap()).unwrap();
@@ -376,13 +469,19 @@ mod tests {
         let volumes_tmp = std::env::temp_dir().join("test_analyzer_volumes");
         std::fs::create_dir_all(volumes_tmp.join("inbox")).ok();
 
-        let result = run_analyzer(
-            volumes_tmp.to_str().unwrap(),
-            tmp.to_str().unwrap(),
-        ).unwrap();
+        let result = run_analyzer(volumes_tmp.to_str().unwrap(), tmp.to_str().unwrap()).unwrap();
 
-        assert!(result.get("proposals_count").and_then(|v| v.as_u64()).unwrap() >= 1);
-        let proposals_path = result.get("proposals_path").and_then(|v| v.as_str()).unwrap();
+        assert!(
+            result
+                .get("proposals_count")
+                .and_then(|v| v.as_u64())
+                .unwrap()
+                >= 1
+        );
+        let proposals_path = result
+            .get("proposals_path")
+            .and_then(|v| v.as_str())
+            .unwrap();
         let report = std::fs::read_to_string(proposals_path).unwrap();
         assert!(report.contains("inflection_point"));
 
@@ -400,9 +499,18 @@ mod tests {
 
     #[test]
     fn test_classify_task_type() {
-        assert_eq!(classify_task_type(&json!({"prompt_summary": "cargo build"})), "build");
-        assert_eq!(classify_task_type(&json!({"prompt_summary": "fix the bug"})), "fix");
-        assert_eq!(classify_task_type(&json!({"prompt_summary": "hello world"})), "general");
+        assert_eq!(
+            classify_task_type(&json!({"prompt_summary": "cargo build"})),
+            "build"
+        );
+        assert_eq!(
+            classify_task_type(&json!({"prompt_summary": "fix the bug"})),
+            "fix"
+        );
+        assert_eq!(
+            classify_task_type(&json!({"prompt_summary": "hello world"})),
+            "general"
+        );
     }
 
     #[test]

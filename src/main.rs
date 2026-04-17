@@ -32,7 +32,13 @@ enum StdinMode {
 }
 
 // Dashboard
-use axum::{extract::{Path as AxumPath, Query, State}, http::StatusCode, response::IntoResponse, routing::{get, post}, Json, Router};
+use axum::{
+    extract::{Path as AxumPath, Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
 use tower_http::cors::{Any, CorsLayer};
 
 // ============================================================================
@@ -41,7 +47,8 @@ use tower_http::cors::{Any, CorsLayer};
 
 const MAX_HISTORY_ENTRIES: usize = 500;
 const GPT_API_URL: &str = "https://api.openai.com/v1/chat/completions";
-#[allow(dead_code)] const ROLLBACK_RETENTION_HOURS: i64 = 24;
+#[allow(dead_code)]
+const ROLLBACK_RETENTION_HOURS: i64 = 24;
 const DEFAULT_GPT_MODEL: &str = "o3";
 
 use once_cell::sync::Lazy;
@@ -56,11 +63,10 @@ static DASHBOARD_ABORT: Lazy<Mutex<Option<tokio::task::AbortHandle>>> =
     Lazy::new(|| Mutex::new(None));
 
 fn default_data_dir() -> String {
-    std::env::var("MANAGER_DATA_DIR")
-        .unwrap_or_else(|_| {
-            let local = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\ProgramData".to_string());
-            format!(r"{}\manager-mcp", local)
-        })
+    std::env::var("MANAGER_DATA_DIR").unwrap_or_else(|_| {
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\ProgramData".to_string());
+        format!(r"{}\manager-mcp", local)
+    })
 }
 
 macro_rules! lazy_path {
@@ -69,26 +75,61 @@ macro_rules! lazy_path {
     };
 }
 
-lazy_path!(_TASKS_DIR, "MANAGER_TASKS_DIR", format!(r"{}\tasks", default_data_dir()));
+lazy_path!(
+    _TASKS_DIR,
+    "MANAGER_TASKS_DIR",
+    format!(r"{}\tasks", default_data_dir())
+);
 lazy_path!(_HISTORY_DIR, "MANAGER_HISTORY_DIR", default_data_dir());
-lazy_path!(_WORKFLOW_PATTERNS_DIR, "MANAGER_WORKFLOW_DIR", format!(r"{}\workflow_patterns", default_data_dir()));
-lazy_path!(_ROLLBACK_DIR, "MANAGER_ROLLBACK_DIR", format!(r"{}\rollback", default_data_dir()));
-lazy_path!(_LEARNED_PATTERNS_DIR, "MANAGER_PATTERNS_DIR", format!(r"{}\learned_patterns", default_data_dir()));
-lazy_path!(_DASHBOARD_PREFS_PATH, "MANAGER_DASHBOARD_PREFS", format!(r"{}\dashboard_prefs.json", default_data_dir()));
-lazy_path!(_LOAVES_DIR, "MANAGER_LOAVES_DIR", format!(r"{}\loaves", default_data_dir()));
+lazy_path!(
+    _WORKFLOW_PATTERNS_DIR,
+    "MANAGER_WORKFLOW_DIR",
+    format!(r"{}\workflow_patterns", default_data_dir())
+);
+lazy_path!(
+    _ROLLBACK_DIR,
+    "MANAGER_ROLLBACK_DIR",
+    format!(r"{}\rollback", default_data_dir())
+);
+lazy_path!(
+    _LEARNED_PATTERNS_DIR,
+    "MANAGER_PATTERNS_DIR",
+    format!(r"{}\learned_patterns", default_data_dir())
+);
+lazy_path!(
+    _DASHBOARD_PREFS_PATH,
+    "MANAGER_DASHBOARD_PREFS",
+    format!(r"{}\dashboard_prefs.json", default_data_dir())
+);
+lazy_path!(
+    _LOAVES_DIR,
+    "MANAGER_LOAVES_DIR",
+    format!(r"{}\loaves", default_data_dir())
+);
 
 static _GEMINI_CMD: Lazy<String> = Lazy::new(|| {
     std::env::var("gemini_cmd()").unwrap_or_else(|_| {
         let npm_root = std::env::var("APPDATA").unwrap_or_default();
-        let npm_path = format!(r"{}\npm\node_modules\@google\gemini-cli\dist\index.js", npm_root);
-        if std::path::Path::new(&npm_path).exists() { npm_path } else { "gemini".to_string() }
+        let npm_path = format!(
+            r"{}\npm\node_modules\@google\gemini-cli\dist\index.js",
+            npm_root
+        );
+        if std::path::Path::new(&npm_path).exists() {
+            npm_path
+        } else {
+            "gemini".to_string()
+        }
     })
 });
 static _CLAUDE_CODE_CMD: Lazy<String> = Lazy::new(|| {
     std::env::var("claude_code_cmd()").unwrap_or_else(|_| {
         let home = std::env::var("USERPROFILE").unwrap_or_default();
         let local_path = format!(r"{}\.local\bin\claude.exe", home);
-        if std::path::Path::new(&local_path).exists() { local_path } else { "claude".to_string() }
+        if std::path::Path::new(&local_path).exists() {
+            local_path
+        } else {
+            "claude".to_string()
+        }
     })
 });
 static _CODEX_CMD: Lazy<String> = Lazy::new(|| {
@@ -104,7 +145,11 @@ static _CODEX_CMD: Lazy<String> = Lazy::new(|| {
 static _NODE_CMD: Lazy<String> = Lazy::new(|| {
     std::env::var("node_cmd()").unwrap_or_else(|_| {
         let pf = r"C:\Program Files\nodejs\node.exe";
-        if std::path::Path::new(pf).exists() { pf.to_string() } else { "node".to_string() }
+        if std::path::Path::new(pf).exists() {
+            pf.to_string()
+        } else {
+            "node".to_string()
+        }
     })
 });
 static _LOAVES_ARCHIVE_DIR: Lazy<String> = Lazy::new(|| format!(r"{}\archive", &*_LOAVES_DIR));
@@ -113,25 +158,52 @@ static _LOAVES_ARCHIVE_DIR: Lazy<String> = Lazy::new(|| format!(r"{}\archive", &
 const fn _ignore() {}
 #[allow(unused_macros)]
 macro_rules! path_ref {
-    ($static_name:ident) => { &*$static_name }
+    ($static_name:ident) => {
+        &*$static_name
+    };
 }
 
 // Accessor functions so existing code compiles with minimal changes
-fn tasks_dir() -> &'static str { &_TASKS_DIR }
-fn history_dir() -> &'static str { &_HISTORY_DIR }
-fn gemini_cmd() -> &'static str { &_GEMINI_CMD }
-fn claude_code_cmd() -> &'static str { &_CLAUDE_CODE_CMD }
-fn codex_cmd() -> &'static str { &_CODEX_CMD }
-fn workflow_patterns_dir() -> &'static str { &_WORKFLOW_PATTERNS_DIR }
-fn rollback_dir() -> &'static str { &_ROLLBACK_DIR }
-fn learned_patterns_dir() -> &'static str { &_LEARNED_PATTERNS_DIR }
-fn node_cmd() -> &'static str { &_NODE_CMD }
-#[allow(dead_code)] fn dashboard_prefs_path() -> &'static str { &_DASHBOARD_PREFS_PATH }
-fn loaves_dir() -> &'static str { &_LOAVES_DIR }
-fn loaves_archive_dir() -> &'static str { &_LOAVES_ARCHIVE_DIR }
+fn tasks_dir() -> &'static str {
+    &_TASKS_DIR
+}
+fn history_dir() -> &'static str {
+    &_HISTORY_DIR
+}
+fn gemini_cmd() -> &'static str {
+    &_GEMINI_CMD
+}
+fn claude_code_cmd() -> &'static str {
+    &_CLAUDE_CODE_CMD
+}
+fn codex_cmd() -> &'static str {
+    &_CODEX_CMD
+}
+fn workflow_patterns_dir() -> &'static str {
+    &_WORKFLOW_PATTERNS_DIR
+}
+fn rollback_dir() -> &'static str {
+    &_ROLLBACK_DIR
+}
+fn learned_patterns_dir() -> &'static str {
+    &_LEARNED_PATTERNS_DIR
+}
+fn node_cmd() -> &'static str {
+    &_NODE_CMD
+}
+#[allow(dead_code)]
+fn dashboard_prefs_path() -> &'static str {
+    &_DASHBOARD_PREFS_PATH
+}
+fn loaves_dir() -> &'static str {
+    &_LOAVES_DIR
+}
+fn loaves_archive_dir() -> &'static str {
+    &_LOAVES_ARCHIVE_DIR
+}
 
-
-#[allow(dead_code)] fn load_terminal_visible() -> bool {
+#[allow(dead_code)]
+fn load_terminal_visible() -> bool {
     std::fs::read_to_string(dashboard_prefs_path())
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
@@ -143,33 +215,59 @@ fn loaves_archive_dir() -> &'static str { &_LOAVES_ARCHIVE_DIR }
 /// Fire-and-forget â€” errors are logged but don't affect the background task.
 fn spawn_visible_terminal(title: &str, exe: &str, args: &[String], working_dir: &str) {
     // Write full command to temp .bat to avoid cmd/wt quoting hell
-    let skip_args: std::collections::HashSet<&str> = ["--output-format", "stream-json"].iter().copied().collect();
+    let skip_args: std::collections::HashSet<&str> =
+        ["--output-format", "stream-json"].iter().copied().collect();
     let mut cmd_parts: Vec<String> = vec![exe.to_string()];
     for a in args {
-        if skip_args.contains(a.as_str()) { continue; }
+        if skip_args.contains(a.as_str()) {
+            continue;
+        }
         if a.contains(' ') || a.contains('"') || a.contains('\\') {
             cmd_parts.push(format!("\"{}\"", a.replace('"', "\\\"")));
         } else {
             cmd_parts.push(a.clone());
         }
     }
-    let cmd_line = format!("@echo off\r\ncd /d {}\r\n{}", working_dir, cmd_parts.join(" "));
+    let cmd_line = format!(
+        "@echo off\r\ncd /d {}\r\n{}",
+        working_dir,
+        cmd_parts.join(" ")
+    );
 
-    let staging = format!("{}\\CPC\\staging",
-        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\Users\Public".to_string()));
+    let staging = format!(
+        "{}\\CPC\\staging",
+        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\Users\Public".to_string())
+    );
     let _ = std::fs::create_dir_all(&staging);
-    let bat_name = format!("task_{}.bat",
-        title.chars().filter(|c| c.is_alphanumeric()).take(20).collect::<String>());
+    let bat_name = format!(
+        "task_{}.bat",
+        title
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .take(20)
+            .collect::<String>()
+    );
     let bat_path = format!("{}\\{}", staging, bat_name);
-    if std::fs::write(&bat_path, &cmd_line).is_err() { return; }
+    if std::fs::write(&bat_path, &cmd_line).is_err() {
+        return;
+    }
 
     // Try wt first, fallback to cmd start
     let wt = std::process::Command::new("wt")
-        .args(["-w", "0", "new-tab", "--title", title, "cmd", "/K", &bat_path])
+        .args([
+            "-w", "0", "new-tab", "--title", title, "cmd", "/K", &bat_path,
+        ])
         .spawn();
     if wt.is_err() {
         let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", &format!("\"{}\"", title), "cmd", "/K", &bat_path])
+            .args([
+                "/C",
+                "start",
+                &format!("\"{}\"", title),
+                "cmd",
+                "/K",
+                &bat_path,
+            ])
             .spawn();
     }
 }
@@ -276,19 +374,23 @@ enum ExtractionStatus {
 }
 
 impl Default for ExtractionStatus {
-    fn default() -> Self { ExtractionStatus::None }
+    fn default() -> Self {
+        ExtractionStatus::None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum TrustLevel {
-    Low,      // 1-3: fire and forget
-    Medium,   // 4-6: auto-backup before start
-    High,     // 7-10: backup + require diff review
+    Low,    // 1-3: fire and forget
+    Medium, // 4-6: auto-backup before start
+    High,   // 7-10: backup + require diff review
 }
 
 impl Default for TrustLevel {
-    fn default() -> Self { TrustLevel::Low }
+    fn default() -> Self {
+        TrustLevel::Low
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -301,10 +403,14 @@ enum ValidationStatus {
 }
 
 impl Default for ValidationStatus {
-    fn default() -> Self { ValidationStatus::NotChecked }
+    fn default() -> Self {
+        ValidationStatus::NotChecked
+    }
 }
 
-fn default_max_retries() -> u32 { 2 }
+fn default_max_retries() -> u32 {
+    2
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TaskStep {
@@ -473,9 +579,18 @@ struct WorkflowTemplate {
     success_rate: f64,
 }
 
-#[allow(dead_code)] fn default_backend() -> String { "claude_code".into() }
-#[allow(dead_code)] fn default_trust_tmpl() -> String { "auto_with_backup".into() }
-#[allow(dead_code)] fn default_success_rate() -> f64 { 1.0 }
+#[allow(dead_code)]
+fn default_backend() -> String {
+    "claude_code".into()
+}
+#[allow(dead_code)]
+fn default_trust_tmpl() -> String {
+    "auto_with_backup".into()
+}
+#[allow(dead_code)]
+fn default_success_rate() -> f64 {
+    1.0
+}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)]
@@ -530,7 +645,9 @@ impl Server {
                             // Observe — do NOT clobber Running/Queued tasks as Failed.
                             // The child process may still be alive even though manager restarted.
                             let mut task = task;
-                            if task.status == TaskStatus::Running || task.status == TaskStatus::Queued {
+                            if task.status == TaskStatus::Running
+                                || task.status == TaskStatus::Queued
+                            {
                                 let is_session = task.id.starts_with("ses_");
                                 let obs = format!(
                                     "[{}] Manager restarted — task was {} at load time. Child PID: {}",
@@ -540,13 +657,19 @@ impl Server {
                                 );
                                 task.watchdog_observations.push(obs);
                                 // Check if child PID is still alive (best-effort)
-                                let child_alive = task.child_pid.map(|pid| {
-                                    std::process::Command::new("tasklist")
-                                        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-                                        .output()
-                                        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-                                        .unwrap_or(false)
-                                }).unwrap_or(false);
+                                let child_alive = task
+                                    .child_pid
+                                    .map(|pid| {
+                                        std::process::Command::new("tasklist")
+                                            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+                                            .output()
+                                            .map(|o| {
+                                                String::from_utf8_lossy(&o.stdout)
+                                                    .contains(&pid.to_string())
+                                            })
+                                            .unwrap_or(false)
+                                    })
+                                    .unwrap_or(false);
                                 if child_alive {
                                     if is_session {
                                         // v1.2.7: Session child still alive but stdout/stderr pipes were
@@ -647,7 +770,9 @@ impl Server {
         let history_path = format!("{}\\task_history.json", history_dir());
         let prompt_summary: String = if task.prompt.len() > 100 {
             safe_truncate(&task.prompt, 100)
-        } else { task.prompt.clone() };
+        } else {
+            task.prompt.clone()
+        };
         let entry = json!({
             "task_id": task.id,
             "backend": task.backend.to_string(),
@@ -702,21 +827,42 @@ impl Server {
         let mut score: u8 = 1;
 
         // File operations
-        if prompt_lower.contains("delete") || prompt_lower.contains("remove") || prompt_lower.contains("rm ") { score += 3; }
-        if prompt_lower.contains("overwrite") || prompt_lower.contains("replace") { score += 2; }
-        if prompt_lower.contains("format") || prompt_lower.contains("drop") { score += 4; }
+        if prompt_lower.contains("delete")
+            || prompt_lower.contains("remove")
+            || prompt_lower.contains("rm ")
+        {
+            score += 3;
+        }
+        if prompt_lower.contains("overwrite") || prompt_lower.contains("replace") {
+            score += 2;
+        }
+        if prompt_lower.contains("format") || prompt_lower.contains("drop") {
+            score += 4;
+        }
 
         // Git operations
-        if prompt_lower.contains("git push") || prompt_lower.contains("force push") { score += 3; }
-        if prompt_lower.contains("git reset --hard") { score += 4; }
+        if prompt_lower.contains("git push") || prompt_lower.contains("force push") {
+            score += 3;
+        }
+        if prompt_lower.contains("git reset --hard") {
+            score += 4;
+        }
 
         // System operations
-        if prompt_lower.contains("registry") || prompt_lower.contains("regedit") { score += 5; }
-        if prompt_lower.contains("install") || prompt_lower.contains("uninstall") { score += 2; }
+        if prompt_lower.contains("registry") || prompt_lower.contains("regedit") {
+            score += 5;
+        }
+        if prompt_lower.contains("install") || prompt_lower.contains("uninstall") {
+            score += 2;
+        }
 
         // Scope amplifiers
-        if prompt_lower.contains("all files") || prompt_lower.contains("recursive") { score += 2; }
-        if prompt_lower.contains("production") || prompt_lower.contains("deploy") { score += 1; }
+        if prompt_lower.contains("all files") || prompt_lower.contains("recursive") {
+            score += 2;
+        }
+        if prompt_lower.contains("production") || prompt_lower.contains("deploy") {
+            score += 1;
+        }
 
         // Cap at 10
         score = score.min(10);
@@ -732,7 +878,9 @@ impl Server {
 
     /// Create rollback backups for files mentioned in the prompt.
     fn create_rollback(task: &mut Task) {
-        if task.trust_level == TrustLevel::Low { return; }
+        if task.trust_level == TrustLevel::Low {
+            return;
+        }
 
         let rollback_dir = format!(r"{}\{}", rollback_dir(), task.id);
         let _ = std::fs::create_dir_all(&rollback_dir);
@@ -766,7 +914,9 @@ impl Server {
 
     /// Restore backed up files on failure.
     fn rollback(task: &Task) -> Result<Vec<String>, String> {
-        let rollback_dir = task.rollback_path.as_ref()
+        let rollback_dir = task
+            .rollback_path
+            .as_ref()
             .ok_or("No rollback data for this task")?;
 
         let mut restored = Vec::new();
@@ -792,9 +942,14 @@ impl Server {
         let mut assertions: Vec<String> = Vec::new();
 
         // Extract file paths that should exist after creation
-        let path_regex = match regex::Regex::new(r#"[Cc]reate\s+(?:a\s+file\s+(?:at\s+)?)?([A-Za-z]:\\[^\s,;'"]+\.\w+)"#) {
+        let path_regex = match regex::Regex::new(
+            r#"[Cc]reate\s+(?:a\s+file\s+(?:at\s+)?)?([A-Za-z]:\\[^\s,;'"]+\.\w+)"#,
+        ) {
             Ok(r) => r,
-            Err(_) => { task.validation_status = ValidationStatus::Skipped; return; }
+            Err(_) => {
+                task.validation_status = ValidationStatus::Skipped;
+                return;
+            }
         };
         for cap in path_regex.captures_iter(&task.prompt) {
             if let Some(path) = cap.get(1) {
@@ -808,7 +963,10 @@ impl Server {
             if let Some(re) = pkg_regex {
                 if let Some(cap) = re.captures(&task.prompt) {
                     if let Some(pkg) = cap.get(1) {
-                        assertions.push(format!(r"file_exists:C:\rust-mcp\target\release\{}.exe", pkg.as_str()));
+                        assertions.push(format!(
+                            r"file_exists:C:\rust-mcp\target\release\{}.exe",
+                            pkg.as_str()
+                        ));
                     }
                 }
             }
@@ -826,13 +984,23 @@ impl Server {
         for assertion in &assertions {
             if let Some(path) = assertion.strip_prefix("file_exists:") {
                 let passed = std::path::Path::new(path).exists();
-                checked_assertions.push(format!("{}:{}", assertion, if passed { "PASS" } else { "FAIL" }));
-                if !passed { all_passed = false; }
+                checked_assertions.push(format!(
+                    "{}:{}",
+                    assertion,
+                    if passed { "PASS" } else { "FAIL" }
+                ));
+                if !passed {
+                    all_passed = false;
+                }
             }
         }
 
         task.assertions = checked_assertions;
-        task.validation_status = if all_passed { ValidationStatus::Passed } else { ValidationStatus::Failed };
+        task.validation_status = if all_passed {
+            ValidationStatus::Passed
+        } else {
+            ValidationStatus::Failed
+        };
 
         // Item 18: Clean up rollback backup when validation passes
         if all_passed {
@@ -846,14 +1014,18 @@ impl Server {
         }
     }
 
-        /// Item 3: Generate smart end report. Success = summary. Failure = step trail.
+    /// Item 3: Generate smart end report. Success = summary. Failure = step trail.
     fn generate_end_report(task: &Task) -> String {
         match task.status {
             TaskStatus::Done => {
                 // Success: last 500 chars of output as summary
                 let out = &task.output;
                 if out.len() > 500 {
-                    format!("âœ“ Task completed ({} steps)\n\n{}", task.steps.len(), &out[out.len()-500..])
+                    format!(
+                        "âœ“ Task completed ({} steps)\n\n{}",
+                        task.steps.len(),
+                        &out[out.len() - 500..]
+                    )
                 } else {
                     format!("âœ“ Task completed ({} steps)\n\n{}", task.steps.len(), out)
                 }
@@ -868,7 +1040,13 @@ impl Server {
                         "error" => "âœ—",
                         _ => "—",
                     };
-                    report.push_str(&format!("  {} {}. {} ({})\n", mark, i+1, step.tool, step.status));
+                    report.push_str(&format!(
+                        "  {} {}. {} ({})\n",
+                        mark,
+                        i + 1,
+                        step.tool,
+                        step.status
+                    ));
                 }
                 if let Some(ref err) = task.error {
                     report.push_str(&format!("\nError: {}\n", err));
@@ -876,7 +1054,7 @@ impl Server {
                 // Last 300 chars of output for context
                 let out = &task.output;
                 if out.len() > 300 {
-                    report.push_str(&format!("\nLast output:\n{}", &out[out.len()-300..]));
+                    report.push_str(&format!("\nLast output:\n{}", &out[out.len() - 300..]));
                 } else if !out.is_empty() {
                     report.push_str(&format!("\nOutput:\n{}", out));
                 }
@@ -891,7 +1069,10 @@ impl Server {
     /// handle_get_status to avoid false positives during long-running tool
     /// invocations like Write on large files.
     fn active_tool_running(task: &Task) -> bool {
-        task.steps.last().map(|s| s.status == "started").unwrap_or(false)
+        task.steps
+            .last()
+            .map(|s| s.status == "started")
+            .unwrap_or(false)
     }
 
     /// Item 4: Read breadcrumb state for Gemini injection.
@@ -904,13 +1085,17 @@ impl Server {
         };
         if std::path::Path::new(&local_state_dir).exists() {
             let active_path = format!(r"{}\active_operation.json", local_state_dir);
-            if let Some(v) = std::fs::read_to_string(&active_path).ok()
+            if let Some(v) = std::fs::read_to_string(&active_path)
+                .ok()
                 .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             {
                 let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("?");
                 let step = v.get("current_step").and_then(|s| s.as_u64()).unwrap_or(0);
                 let total = v.get("total_steps").and_then(|s| s.as_u64()).unwrap_or(0);
-                return Some(format!("[CONTEXT: Current operation: {} (step {}/{})]", name, step, total));
+                return Some(format!(
+                    "[CONTEXT: Current operation: {} (step {}/{})]",
+                    name, step, total
+                ));
             }
             return None; // local state dir exists, no active operation
         }
@@ -920,8 +1105,7 @@ impl Server {
             format!(r"{}\autonomous", local)
         });
         let bc_jsonl = format!(r"{}\logs\breadcrumb.jsonl", autonomous_data);
-        read_state_file(&bc_jsonl)
-            .map(|line| format!("[CONTEXT: Active breadcrumb: {}]", line))
+        read_state_file(&bc_jsonl).map(|line| format!("[CONTEXT: Active breadcrumb: {}]", line))
     }
 
     /// Item 18: Build a retry task from a failed task. Returns the new Task to be inserted into the store.
@@ -931,7 +1115,9 @@ impl Server {
             return None;
         }
 
-        let error_text = task.error.clone()
+        let error_text = task
+            .error
+            .clone()
             .or_else(|| {
                 let lines: Vec<&str> = task.output.lines().collect();
                 let tail: Vec<&str> = lines.iter().rev().take(5).copied().collect();
@@ -959,8 +1145,15 @@ impl Server {
         };
 
         // Extract original prompt (strip any previous retry injection)
-        let original_prompt = task.retry_of.as_ref()
-            .and_then(|_| task.prompt.split("\n\n--- PREVIOUS ATTEMPT FAILED ---").next().map(String::from))
+        let original_prompt = task
+            .retry_of
+            .as_ref()
+            .and_then(|_| {
+                task.prompt
+                    .split("\n\n--- PREVIOUS ATTEMPT FAILED ---")
+                    .next()
+                    .map(String::from)
+            })
             .unwrap_or_else(|| task.prompt.clone());
 
         let new_prompt = format!(
@@ -984,13 +1177,25 @@ impl Server {
             created_at: Utc::now(),
             started_at: None,
             completed_at: None,
-            progress_lines: 0, steps: Vec::new(), last_activity: None, last_output_chunk_at: None, stall_detected: false, extraction_status: ExtractionStatus::None,
-            trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None, validation_status: ValidationStatus::NotChecked, assertions: Vec::new(), backed_up_files: Vec::new(),
+            progress_lines: 0,
+            steps: Vec::new(),
+            last_activity: None,
+            last_output_chunk_at: None,
+            stall_detected: false,
+            extraction_status: ExtractionStatus::None,
+            trust_score: 0,
+            trust_level: TrustLevel::Low,
+            rollback_path: None,
+            validation_status: ValidationStatus::NotChecked,
+            assertions: Vec::new(),
+            backed_up_files: Vec::new(),
             retry_count: task.retry_count + 1,
             max_retries: task.max_retries,
             retry_of: Some(original_id),
             error_context: Some(error_text),
-            input_tokens: 0, output_tokens: 0, cost_usd: 0.0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0.0,
             on_complete: task.on_complete.clone(),
             role: task.role.clone(),
             save_artifact: task.save_artifact,
@@ -1002,17 +1207,24 @@ impl Server {
             watchdog_observations: Vec::new(),
             fingerprint: None,
             superseded_by: None,
-        label: None,
-        current_step: None,
-        total_steps: None,
-        current_step_desc: None,
-        live_activity: None,
-        effort: new_effort,
+            label: None,
+            current_step: None,
+            total_steps: None,
+            current_step_desc: None,
+            live_activity: None,
+            effort: new_effort,
         };
 
         // Note on original task
-        task.output.push_str(&format!("\n[Retrying as {}]", new_task_id));
-        info!("Retry {}/{} for task {} -> new task {}", task.retry_count + 1, task.max_retries, task.id, new_task_id);
+        task.output
+            .push_str(&format!("\n[Retrying as {}]", new_task_id));
+        info!(
+            "Retry {}/{} for task {} -> new task {}",
+            task.retry_count + 1,
+            task.max_retries,
+            task.id,
+            new_task_id
+        );
 
         Some(new_task)
     }
@@ -1024,9 +1236,12 @@ impl Server {
             None => return,
         };
 
-        let original_error = task.error_context.clone().unwrap_or_else(|| "unknown".to_string());
+        let original_error = task
+            .error_context
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
         let output_summary: String = if task.output.len() > 500 {
-            task.output[task.output.len()-500..].to_string()
+            task.output[task.output.len() - 500..].to_string()
         } else {
             task.output.clone()
         };
@@ -1044,14 +1259,18 @@ impl Server {
         });
 
         let _ = std::fs::create_dir_all(learned_patterns_dir());
-        let filename = format!("{}\\{}_{}.json",
+        let filename = format!(
+            "{}\\{}_{}.json",
             learned_patterns_dir(),
             Utc::now().format("%Y%m%d_%H%M%S"),
             task.id
         );
         if let Ok(data) = serde_json::to_string_pretty(&pattern) {
             if std::fs::write(&filename, &data).is_ok() {
-                info!("Learned pattern from retry success: {} -> {}", original_id, task.id);
+                info!(
+                    "Learned pattern from retry success: {} -> {}",
+                    original_id, task.id
+                );
             }
         }
     }
@@ -1061,20 +1280,56 @@ impl Server {
         let prompt_lower = prompt.to_lowercase();
 
         // --- Keyword scoring ---
-        struct KeywordRule { keywords: &'static [&'static str], backend: &'static str, weight: f32 }
+        struct KeywordRule {
+            keywords: &'static [&'static str],
+            backend: &'static str,
+            weight: f32,
+        }
         let rules = [
-            KeywordRule { keywords: &["build", "cargo", "compile", "rust", "npm", "install"], backend: "claude_code", weight: 0.8 },
-            KeywordRule { keywords: &["edit", "refactor", "complex", "multi-file", "debug"], backend: "claude_code", weight: 0.7 },
-            KeywordRule { keywords: &["read", "report", "list", "check", "verify", "simple"], backend: "gemini", weight: 0.6 },
-            KeywordRule { keywords: &["search", "google", "find online", "look up"], backend: "gemini", weight: 0.7 },
-            KeywordRule { keywords: &["review", "audit", "sandbox", "safe"], backend: "codex", weight: 0.6 },
-            KeywordRule { keywords: &["delete", "overwrite", "deploy", "push"], backend: "codex", weight: 0.7 },
-            KeywordRule { keywords: &["reason", "analyze", "think", "strategy", "plan"], backend: "gpt", weight: 0.6 },
+            KeywordRule {
+                keywords: &["build", "cargo", "compile", "rust", "npm", "install"],
+                backend: "claude_code",
+                weight: 0.8,
+            },
+            KeywordRule {
+                keywords: &["edit", "refactor", "complex", "multi-file", "debug"],
+                backend: "claude_code",
+                weight: 0.7,
+            },
+            KeywordRule {
+                keywords: &["read", "report", "list", "check", "verify", "simple"],
+                backend: "gemini",
+                weight: 0.6,
+            },
+            KeywordRule {
+                keywords: &["search", "google", "find online", "look up"],
+                backend: "gemini",
+                weight: 0.7,
+            },
+            KeywordRule {
+                keywords: &["review", "audit", "sandbox", "safe"],
+                backend: "codex",
+                weight: 0.6,
+            },
+            KeywordRule {
+                keywords: &["delete", "overwrite", "deploy", "push"],
+                backend: "codex",
+                weight: 0.7,
+            },
+            KeywordRule {
+                keywords: &["reason", "analyze", "think", "strategy", "plan"],
+                backend: "gpt",
+                weight: 0.6,
+            },
         ];
 
         let mut keyword_scores: HashMap<&str, f32> = HashMap::new();
         for rule in &rules {
-            let hit_count = rule.keywords.iter().filter(|kw| prompt_lower.contains(**kw)).count();
+            let hit_count = rule
+                .keywords
+                .iter()
+                .filter(|kw| prompt_lower.contains(**kw))
+                .count();
             if hit_count > 0 {
                 let score = rule.weight * (hit_count as f32 / rule.keywords.len() as f32);
                 *keyword_scores.entry(rule.backend).or_insert(0.0) += score;
@@ -1098,11 +1353,16 @@ impl Server {
                 for entry in &history {
                     let be = entry.get("backend").and_then(|v| v.as_str()).unwrap_or("");
                     let status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                    let steps = entry.get("step_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let steps = entry
+                        .get("step_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     let stat = backend_stats.entry(be.to_string()).or_insert((0, 0, 0));
                     stat.1 += 1;
                     stat.2 += steps;
-                    if status == "done" { stat.0 += 1; }
+                    if status == "done" {
+                        stat.0 += 1;
+                    }
                 }
             }
         }
@@ -1113,13 +1373,25 @@ impl Server {
             for entry in entries.flatten() {
                 if let Ok(data) = std::fs::read_to_string(entry.path()) {
                     if let Ok(pattern) = serde_json::from_str::<Value>(&data) {
-                        let prompt_pattern = pattern.get("prompt_pattern").and_then(|v| v.as_str()).unwrap_or("");
+                        let prompt_pattern = pattern
+                            .get("prompt_pattern")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         // Check if this learned error is relevant to the current prompt
-                        let pattern_words: Vec<&str> = prompt_pattern.split_whitespace().take(5).collect();
-                        let overlap = pattern_words.iter().filter(|w| prompt_lower.contains(&w.to_lowercase())).count();
+                        let pattern_words: Vec<&str> =
+                            prompt_pattern.split_whitespace().take(5).collect();
+                        let overlap = pattern_words
+                            .iter()
+                            .filter(|w| prompt_lower.contains(&w.to_lowercase()))
+                            .count();
                         if overlap >= 2 {
-                            let failed_backend = pattern.get("backend_original").and_then(|v| v.as_str()).unwrap_or("");
-                            *error_penalties.entry(failed_backend.to_string()).or_insert(0.0) += 0.15;
+                            let failed_backend = pattern
+                                .get("backend_original")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            *error_penalties
+                                .entry(failed_backend.to_string())
+                                .or_insert(0.0) += 0.15;
                         }
                     }
                 }
@@ -1129,15 +1401,29 @@ impl Server {
         // --- Combine scores: keyword 60%, history 30%, speed 10% ---
         let all_backends = ["claude_code", "gemini", "codex", "gpt"];
         let speed_scores: HashMap<&str, f32> = [
-            ("gemini", 0.9), ("codex", 0.7), ("claude_code", 0.5), ("gpt", 0.4),
-        ].into_iter().collect();
+            ("gemini", 0.9),
+            ("codex", 0.7),
+            ("claude_code", 0.5),
+            ("gpt", 0.4),
+        ]
+        .into_iter()
+        .collect();
 
         let mut final_scores: Vec<(&str, f32)> = Vec::new();
         for be in &all_backends {
             let kw = keyword_scores.get(*be).copied().unwrap_or(0.0);
-            let hist = backend_stats.get(*be).map(|(s, t, _)| {
-                if *t == 0 { 0.5 } else { *s as f32 / *t as f32 }
-            }).unwrap_or(0.5);
+            let hist = backend_stats
+                .get(*be)
+                .map(
+                    |(s, t, _)| {
+                        if *t == 0 {
+                            0.5
+                        } else {
+                            *s as f32 / *t as f32
+                        }
+                    },
+                )
+                .unwrap_or(0.5);
             let spd = speed_scores.get(*be).copied().unwrap_or(0.5);
             let penalty = error_penalties.get(*be).copied().unwrap_or(0.0);
             let score = (kw * 0.6) + (hist * 0.3) + (spd * 0.1) - penalty;
@@ -1147,7 +1433,10 @@ impl Server {
         final_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let best = final_scores[0];
-        let alternatives: Vec<String> = final_scores[1..].iter().map(|(be, _)| be.to_string()).collect();
+        let alternatives: Vec<String> = final_scores[1..]
+            .iter()
+            .map(|(be, _)| be.to_string())
+            .collect();
 
         // Confidence: how far ahead the winner is
         let confidence = if final_scores.len() >= 2 {
@@ -1160,11 +1449,18 @@ impl Server {
         // Build reasoning
         let mut reasons = Vec::new();
         if let Some(&kw) = keyword_scores.get(best.0) {
-            if kw > 0.0 { reasons.push(format!("keyword match score {:.2}", kw)); }
+            if kw > 0.0 {
+                reasons.push(format!("keyword match score {:.2}", kw));
+            }
         }
         if let Some((s, t, avg_steps)) = backend_stats.get(best.0) {
             if *t > 0 {
-                reasons.push(format!("historical: {}/{} success, avg {:.1} steps", s, t, *avg_steps as f32 / *t as f32));
+                reasons.push(format!(
+                    "historical: {}/{} success, avg {:.1} steps",
+                    s,
+                    t,
+                    *avg_steps as f32 / *t as f32
+                ));
             }
         }
         if error_penalties.values().any(|&v| v > 0.0) {
@@ -1195,7 +1491,10 @@ fn spawn_retry_execution(
 ) {
     let tid = retry_task.id.clone();
     let prompt = retry_task.prompt.clone();
-    let wd = retry_task.working_dir.clone().unwrap_or_else(|| r"C:\Users\josep".to_string());
+    let wd = retry_task
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| r"C:\Users\josep".to_string());
     let model = retry_task.model.clone();
 
     match retry_task.backend {
@@ -1208,29 +1507,67 @@ fn spawn_retry_execution(
         }
         Backend::ClaudeCode => {
             let mut args = vec![
-                "-p".to_string(), prompt,
-                "--dangerously-skip-permissions".to_string(), "--verbose".to_string(),
-                "--output-format".to_string(), "stream-json".to_string(),
-                "--add-dir".to_string(), r"C:\temp".to_string(),
-                "--add-dir".to_string(), r"C:\My Drive\Volumes".to_string(),
-                "--add-dir".to_string(), r"C:\CPC".to_string(),
-                "--add-dir".to_string(), r"C:\rust-mcp".to_string(),
-                "--add-dir".to_string(), wd,
+                "-p".to_string(),
+                prompt,
+                "--dangerously-skip-permissions".to_string(),
+                "--verbose".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--add-dir".to_string(),
+                r"C:\temp".to_string(),
+                "--add-dir".to_string(),
+                r"C:\My Drive\Volumes".to_string(),
+                "--add-dir".to_string(),
+                r"C:\CPC".to_string(),
+                "--add-dir".to_string(),
+                r"C:\rust-mcp".to_string(),
+                "--add-dir".to_string(),
+                wd,
             ];
-            if let Some(m) = model { args.push("--model".to_string()); args.push(m); }
-            handle.spawn(run_cli_task(tasks, tid, claude_code_cmd(), args, None, StdinMode::Null));
+            if let Some(m) = model {
+                args.push("--model".to_string());
+                args.push(m);
+            }
+            handle.spawn(run_cli_task(
+                tasks,
+                tid,
+                claude_code_cmd(),
+                args,
+                None,
+                StdinMode::Null,
+            ));
         }
         Backend::Codex => {
             let args = vec![
-                "exec".into(), "--json".into(), "--skip-git-repo-check".into(),
-                "--full-auto".into(), "--cd".into(), wd.clone(), prompt,
+                "exec".into(),
+                "--json".into(),
+                "--skip-git-repo-check".into(),
+                "--full-auto".into(),
+                "--cd".into(),
+                wd.clone(),
+                prompt,
             ];
             handle.spawn(run_codex_task(tasks, tid, args, wd));
         }
         Backend::Gemini => {
-            let mut args = vec![gemini_cmd().to_string(), "-p".into(), prompt, "--yolo".into()];
-            if let Some(m) = model { args.push("--model".to_string()); args.push(m); }
-            handle.spawn(run_cli_task(tasks, tid, node_cmd(), args, None, StdinMode::Null));
+            let mut args = vec![
+                gemini_cmd().to_string(),
+                "-p".into(),
+                prompt,
+                "--yolo".into(),
+            ];
+            if let Some(m) = model {
+                args.push("--model".to_string());
+                args.push(m);
+            }
+            handle.spawn(run_cli_task(
+                tasks,
+                tid,
+                node_cmd(),
+                args,
+                None,
+                StdinMode::Null,
+            ));
         }
     }
 }
@@ -1243,7 +1580,9 @@ fn spawn_on_complete(
     config: Option<Arc<RwLock<ServerConfig>>>,
     handle: &tokio::runtime::Handle,
 ) {
-    if completed_task.status != TaskStatus::Done { return; }
+    if completed_task.status != TaskStatus::Done {
+        return;
+    }
     let prompt = match completed_task.on_complete {
         Some(ref p) => p.clone(),
         None => return,
@@ -1266,8 +1605,25 @@ fn spawn_on_complete(
         created_at: Utc::now(),
         started_at: None,
         completed_at: None,
-        progress_lines: 0, steps: Vec::new(), last_activity: None, last_output_chunk_at: None, stall_detected: false, extraction_status: ExtractionStatus::None,
-        trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None, validation_status: ValidationStatus::NotChecked, assertions: Vec::new(), backed_up_files: Vec::new(), retry_count: 0, max_retries: 2, retry_of: None, error_context: None, input_tokens: 0, output_tokens: 0, cost_usd: 0.0,
+        progress_lines: 0,
+        steps: Vec::new(),
+        last_activity: None,
+        last_output_chunk_at: None,
+        stall_detected: false,
+        extraction_status: ExtractionStatus::None,
+        trust_score: 0,
+        trust_level: TrustLevel::Low,
+        rollback_path: None,
+        validation_status: ValidationStatus::NotChecked,
+        assertions: Vec::new(),
+        backed_up_files: Vec::new(),
+        retry_count: 0,
+        max_retries: 2,
+        retry_of: None,
+        error_context: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0.0,
         on_complete: None,
         role: None,
         save_artifact: false,
@@ -1287,7 +1643,10 @@ fn spawn_on_complete(
         effort: None,
     };
 
-    info!("on_complete: spawning follow-up task {} from completed task {}", follow_up.id, parent_id);
+    info!(
+        "on_complete: spawning follow-up task {} from completed task {}",
+        follow_up.id, parent_id
+    );
     Server::persist_task(&follow_up);
     let tasks_bg = tasks.clone();
     let follow_id = follow_up.id.clone();
@@ -1323,7 +1682,11 @@ async fn run_gpt_task(
     let (prompt, system_prompt, model) = {
         let store = tasks.read().await;
         let task = store.get(&task_id).unwrap();
-        (task.prompt.clone(), task.system_prompt.clone(), task.model.clone())
+        (
+            task.prompt.clone(),
+            task.system_prompt.clone(),
+            task.model.clone(),
+        )
     };
 
     let (api_key, default_model) = {
@@ -1338,12 +1701,15 @@ async fn run_gpt_task(
             let mut retry_task: Option<Task> = None;
             if let Some(task) = store.get_mut(&task_id) {
                 task.status = TaskStatus::Failed;
-                task.error = Some("OPENAI_API_KEY not configured. Use configure tool to set it.".into());
+                task.error =
+                    Some("OPENAI_API_KEY not configured. Use configure tool to set it.".into());
                 task.completed_at = Some(Utc::now());
                 Server::flag_extraction(task);
                 // Item 18: retry/learn hooks
                 retry_task = Server::prepare_retry(task);
-                if task.status == TaskStatus::Done && task.retry_of.is_some() { Server::learn_from_outcome(task); }
+                if task.status == TaskStatus::Done && task.retry_of.is_some() {
+                    Server::learn_from_outcome(task);
+                }
                 Server::persist_task(task);
                 Server::save_to_history(task);
             }
@@ -1353,7 +1719,12 @@ async fn run_gpt_task(
             }
             drop(store);
             if let Some(ref rt) = retry_task {
-                spawn_retry_execution(rt, tasks.clone(), Some(config.clone()), &tokio::runtime::Handle::current());
+                spawn_retry_execution(
+                    rt,
+                    tasks.clone(),
+                    Some(config.clone()),
+                    &tokio::runtime::Handle::current(),
+                );
             }
             return;
         }
@@ -1430,11 +1801,17 @@ async fn run_gpt_task(
             }
         }
         task.completed_at = Some(Utc::now());
-        if task.status == TaskStatus::Done { Server::validate_output(task); }
+        if task.status == TaskStatus::Done {
+            Server::validate_output(task);
+        }
         Server::flag_extraction(task);
         // Item 18: retry/learn hooks
-        if task.status == TaskStatus::Failed { retry_task = Server::prepare_retry(task); }
-        if task.status == TaskStatus::Done && task.retry_of.is_some() { Server::learn_from_outcome(task); }
+        if task.status == TaskStatus::Failed {
+            retry_task = Server::prepare_retry(task);
+        }
+        if task.status == TaskStatus::Done && task.retry_of.is_some() {
+            Server::learn_from_outcome(task);
+        }
         Server::persist_task(task);
         Server::save_to_history(task);
         save_task_artifact(task);
@@ -1446,10 +1823,20 @@ async fn run_gpt_task(
     }
     drop(store);
     if let Some(ref rt) = retry_task {
-        spawn_retry_execution(rt, tasks.clone(), Some(config.clone()), &tokio::runtime::Handle::current());
+        spawn_retry_execution(
+            rt,
+            tasks.clone(),
+            Some(config.clone()),
+            &tokio::runtime::Handle::current(),
+        );
     }
     if let Some(ref ct) = completed_snap {
-        spawn_on_complete(ct, tasks.clone(), Some(config.clone()), &tokio::runtime::Handle::current());
+        spawn_on_complete(
+            ct,
+            tasks.clone(),
+            Some(config.clone()),
+            &tokio::runtime::Handle::current(),
+        );
     }
 }
 
@@ -1479,7 +1866,8 @@ async fn run_codex_task(
             .args(&args_clone)
             .current_dir(&wd)
             .output()
-    }).await;
+    })
+    .await;
 
     let mut store = tasks.write().await;
     let mut retry_task: Option<Task> = None;
@@ -1497,27 +1885,52 @@ async fn run_codex_task(
                             if let Some(item) = ev.get("item") {
                                 match item.get("type").and_then(|t| t.as_str()).unwrap_or("") {
                                     "agent_message" => {
-                                        if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                                        if let Some(text) =
+                                            item.get("text").and_then(|v| v.as_str())
+                                        {
                                             if !text.is_empty() {
-                                                if !task.output.is_empty() { task.output.push('\n'); }
+                                                if !task.output.is_empty() {
+                                                    task.output.push('\n');
+                                                }
                                                 task.output.push_str(text);
                                                 task.progress_lines += 1;
                                             }
                                         }
                                     }
                                     "mcp_tool_call" | "command_execution" => {
-                                        let tool = item.get("tool").or_else(|| item.get("command"))
-                                            .and_then(|v| v.as_str()).unwrap_or("unknown");
-                                        let server = item.get("server").and_then(|v| v.as_str()).unwrap_or("");
-                                        let tool_name = if server.is_empty() { tool.to_string() } else { format!("{}:{}", server, tool) };
-                                        let has_error = item.get("error").map(|e| !e.is_null()).unwrap_or(false);
+                                        let tool = item
+                                            .get("tool")
+                                            .or_else(|| item.get("command"))
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown");
+                                        let server = item
+                                            .get("server")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        let tool_name = if server.is_empty() {
+                                            tool.to_string()
+                                        } else {
+                                            format!("{}:{}", server, tool)
+                                        };
+                                        let has_error = item
+                                            .get("error")
+                                            .map(|e| !e.is_null())
+                                            .unwrap_or(false);
                                         let status = if has_error { "error" } else { "completed" };
                                         task.steps.push(TaskStep {
                                             tool: tool_name,
                                             timestamp: Utc::now(),
                                             status: status.to_string(),
-                                            summary: item.get("arguments").or_else(|| item.get("command"))
-                                                .map(|v| { let s = v.to_string(); { let s_ref: &str = &s; safe_truncate(s_ref, 120) } }),
+                                            summary: item
+                                                .get("arguments")
+                                                .or_else(|| item.get("command"))
+                                                .map(|v| {
+                                                    let s = v.to_string();
+                                                    {
+                                                        let s_ref: &str = &s;
+                                                        safe_truncate(s_ref, 120)
+                                                    }
+                                                }),
                                         });
                                     }
                                     _ => {}
@@ -1526,11 +1939,22 @@ async fn run_codex_task(
                         }
                     }
                 }
-                task.status = if output.status.success() { TaskStatus::Done } else { TaskStatus::Failed };
+                task.status = if output.status.success() {
+                    TaskStatus::Done
+                } else {
+                    TaskStatus::Failed
+                };
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    task.error = Some(format!("Exit {}: {}", output.status.code().unwrap_or(-1),
-                        if stderr.len() > 500 { &stderr[stderr.len()-500..] } else { &stderr }));
+                    task.error = Some(format!(
+                        "Exit {}: {}",
+                        output.status.code().unwrap_or(-1),
+                        if stderr.len() > 500 {
+                            &stderr[stderr.len() - 500..]
+                        } else {
+                            &stderr
+                        }
+                    ));
                 }
             }
             Ok(Err(e)) => {
@@ -1543,11 +1967,17 @@ async fn run_codex_task(
             }
         }
         task.completed_at = Some(Utc::now());
-        if task.status == TaskStatus::Done { Server::validate_output(task); }
+        if task.status == TaskStatus::Done {
+            Server::validate_output(task);
+        }
         Server::flag_extraction(task);
         // Item 18: retry/learn hooks
-        if task.status == TaskStatus::Failed { retry_task = Server::prepare_retry(task); }
-        if task.status == TaskStatus::Done && task.retry_of.is_some() { Server::learn_from_outcome(task); }
+        if task.status == TaskStatus::Failed {
+            retry_task = Server::prepare_retry(task);
+        }
+        if task.status == TaskStatus::Done && task.retry_of.is_some() {
+            Server::learn_from_outcome(task);
+        }
         Server::persist_task(task);
         Server::save_to_history(task);
         save_task_artifact(task);
@@ -1588,7 +2018,8 @@ async fn run_cli_task(
     // Get working dir
     let working_dir = {
         let store = tasks.read().await;
-        store.get(&task_id)
+        store
+            .get(&task_id)
             .and_then(|t| t.working_dir.clone())
             .unwrap_or_else(|| r"C:\Users\josep".to_string())
     };
@@ -1631,9 +2062,7 @@ async fn run_cli_task(
         cmd.env("CLAUDE_CODE_EFFORT_LEVEL", effort);
     }
 
-    let mut child = match cmd
-        .spawn()
-    {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             let mut store = tasks.write().await;
@@ -1718,43 +2147,77 @@ async fn run_cli_task(
                         if !lines.is_empty() {
                             let mut store = tasks_c.write().await;
                             if let Some(task) = store.get_mut(&tid_c) {
-                                if task.status == TaskStatus::Cancelled { return; }
+                                if task.status == TaskStatus::Cancelled {
+                                    return;
+                                }
                                 for line in &lines {
-                                    if line.is_empty() { continue; }
+                                    if line.is_empty() {
+                                        continue;
+                                    }
                                     // Try to parse as stream-json event
                                     if let Ok(ev) = serde_json::from_str::<Value>(line) {
                                         // Update activity timestamp for stall detection
                                         task.last_activity = Some(Utc::now());
                                         task.stall_detected = false;
-                                        let ev_type = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                        let ev_type =
+                                            ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
                                         match ev_type {
                                             "assistant" => {
                                                 // Claude Code nests tool_use AND text in message.content[]
-                                                if let Some(contents) = ev.pointer("/message/content").and_then(|v| v.as_array()) {
+                                                if let Some(contents) = ev
+                                                    .pointer("/message/content")
+                                                    .and_then(|v| v.as_array())
+                                                {
                                                     for item in contents {
-                                                        let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                                        let item_type = item
+                                                            .get("type")
+                                                            .and_then(|t| t.as_str())
+                                                            .unwrap_or("");
                                                         match item_type {
                                                             "text" => {
-                                                                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                                                                if let Some(text) = item
+                                                                    .get("text")
+                                                                    .and_then(|v| v.as_str())
+                                                                {
                                                                     if !text.is_empty() {
-                                                                        if !task.output.is_empty() { task.output.push('\n'); }
+                                                                        if !task.output.is_empty() {
+                                                                            task.output.push('\n');
+                                                                        }
                                                                         task.output.push_str(text);
                                                                         task.progress_lines += 1;
-                                                                        if task.status == TaskStatus::Stalled { task.status = TaskStatus::Running; }
-                                                                        task.last_output_chunk_at = Some(Utc::now());
+                                                                        if task.status
+                                                                            == TaskStatus::Stalled
+                                                                        {
+                                                                            task.status =
+                                                                                TaskStatus::Running;
+                                                                        }
+                                                                        task.last_output_chunk_at =
+                                                                            Some(Utc::now());
                                                                     }
                                                                 }
                                                             }
                                                             "tool_use" => {
-                                                                let tool_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                                                                let tool_name = item
+                                                                    .get("name")
+                                                                    .and_then(|v| v.as_str())
+                                                                    .unwrap_or("unknown")
+                                                                    .to_string();
                                                                 task.steps.push(TaskStep {
                                                                     tool: tool_name,
                                                                     timestamp: Utc::now(),
                                                                     status: "started".to_string(),
-                                                                    summary: item.get("input").map(|v| {
-                                                                        let s = v.to_string();
-                                                                        { let s_ref: &str = &s; safe_truncate(s_ref, 120) }
-                                                                    }),
+                                                                    summary: item.get("input").map(
+                                                                        |v| {
+                                                                            let s = v.to_string();
+                                                                            {
+                                                                                let s_ref: &str =
+                                                                                    &s;
+                                                                                safe_truncate(
+                                                                                    s_ref, 120,
+                                                                                )
+                                                                            }
+                                                                        },
+                                                                    ),
                                                                 });
                                                             }
                                                             _ => {}
@@ -1764,12 +2227,26 @@ async fn run_cli_task(
                                             }
                                             "user" => {
                                                 // Claude Code: tool_result is at .message.content[]
-                                                if let Some(contents) = ev.pointer("/message/content").and_then(|v| v.as_array()) {
+                                                if let Some(contents) = ev
+                                                    .pointer("/message/content")
+                                                    .and_then(|v| v.as_array())
+                                                {
                                                     for item in contents {
-                                                        if item.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
-                                                            if let Some(last) = task.steps.last_mut() {
-                                                                let is_err = item.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
-                                                                last.status = if is_err { "error".to_string() } else { "completed".to_string() };
+                                                        if item.get("type").and_then(|v| v.as_str())
+                                                            == Some("tool_result")
+                                                        {
+                                                            if let Some(last) =
+                                                                task.steps.last_mut()
+                                                            {
+                                                                let is_err = item
+                                                                    .get("is_error")
+                                                                    .and_then(|v| v.as_bool())
+                                                                    .unwrap_or(false);
+                                                                last.status = if is_err {
+                                                                    "error".to_string()
+                                                                } else {
+                                                                    "completed".to_string()
+                                                                };
                                                             }
                                                         }
                                                     }
@@ -1778,33 +2255,76 @@ async fn run_cli_task(
                                             "item.completed" => {
                                                 // Codex: events have item.type (agent_message, mcp_tool_call)
                                                 if let Some(item) = ev.get("item") {
-                                                    let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                                    let item_type = item
+                                                        .get("type")
+                                                        .and_then(|t| t.as_str())
+                                                        .unwrap_or("");
                                                     match item_type {
                                                         "agent_message" => {
-                                                            if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                                                            if let Some(text) = item
+                                                                .get("text")
+                                                                .and_then(|v| v.as_str())
+                                                            {
                                                                 if !text.is_empty() {
-                                                                    if !task.output.is_empty() { task.output.push('\n'); }
+                                                                    if !task.output.is_empty() {
+                                                                        task.output.push('\n');
+                                                                    }
                                                                     task.output.push_str(text);
                                                                     task.progress_lines += 1;
-                                                                    if task.status == TaskStatus::Stalled { task.status = TaskStatus::Running; }
-                                                                    task.last_output_chunk_at = Some(Utc::now());
+                                                                    if task.status
+                                                                        == TaskStatus::Stalled
+                                                                    {
+                                                                        task.status =
+                                                                            TaskStatus::Running;
+                                                                    }
+                                                                    task.last_output_chunk_at =
+                                                                        Some(Utc::now());
                                                                 }
                                                             }
                                                         }
                                                         "mcp_tool_call" => {
-                                                            let tool = item.get("tool").and_then(|v| v.as_str()).unwrap_or("unknown");
-                                                            let server = item.get("server").and_then(|v| v.as_str()).unwrap_or("");
-                                                            let tool_name = if server.is_empty() { tool.to_string() } else { format!("{}:{}", server, tool) };
-                                                            let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("completed");
-                                                            let has_error = item.get("error").is_some() && !item.get("error").unwrap().is_null();
+                                                            let tool = item
+                                                                .get("tool")
+                                                                .and_then(|v| v.as_str())
+                                                                .unwrap_or("unknown");
+                                                            let server = item
+                                                                .get("server")
+                                                                .and_then(|v| v.as_str())
+                                                                .unwrap_or("");
+                                                            let tool_name = if server.is_empty() {
+                                                                tool.to_string()
+                                                            } else {
+                                                                format!("{}:{}", server, tool)
+                                                            };
+                                                            let status = item
+                                                                .get("status")
+                                                                .and_then(|v| v.as_str())
+                                                                .unwrap_or("completed");
+                                                            let has_error =
+                                                                item.get("error").is_some()
+                                                                    && !item
+                                                                        .get("error")
+                                                                        .unwrap()
+                                                                        .is_null();
                                                             task.steps.push(TaskStep {
                                                                 tool: tool_name,
                                                                 timestamp: Utc::now(),
-                                                                status: if has_error { "error".to_string() } else { status.to_string() },
-                                                                summary: item.get("arguments").map(|v| {
-                                                                    let s = v.to_string();
-                                                                    { let s_ref: &str = &s; safe_truncate(s_ref, 120) }
-                                                                }),
+                                                                status: if has_error {
+                                                                    "error".to_string()
+                                                                } else {
+                                                                    status.to_string()
+                                                                },
+                                                                summary: item.get("arguments").map(
+                                                                    |v| {
+                                                                        let s = v.to_string();
+                                                                        {
+                                                                            let s_ref: &str = &s;
+                                                                            safe_truncate(
+                                                                                s_ref, 120,
+                                                                            )
+                                                                        }
+                                                                    },
+                                                                ),
                                                             });
                                                         }
                                                         _ => {}
@@ -1818,10 +2338,14 @@ async fn run_cli_task(
                                         }
                                     } else {
                                         // Not valid JSON — append raw (fallback)
-                                        if !task.output.is_empty() { task.output.push('\n'); }
+                                        if !task.output.is_empty() {
+                                            task.output.push('\n');
+                                        }
                                         task.output.push_str(line);
                                         task.progress_lines += 1;
-                                        if task.status == TaskStatus::Stalled { task.status = TaskStatus::Running; }
+                                        if task.status == TaskStatus::Stalled {
+                                            task.status = TaskStatus::Running;
+                                        }
                                         task.last_output_chunk_at = Some(Utc::now());
                                     }
                                 }
@@ -1837,11 +2361,15 @@ async fn run_cli_task(
                     // Try JSON parse â€” extract text from assistant content array
                     if let Ok(ev) = serde_json::from_str::<Value>(&partial) {
                         if ev.get("type").and_then(|t| t.as_str()) == Some("assistant") {
-                            if let Some(contents) = ev.pointer("/message/content").and_then(|v| v.as_array()) {
+                            if let Some(contents) =
+                                ev.pointer("/message/content").and_then(|v| v.as_array())
+                            {
                                 for item in contents {
                                     if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
                                         if !text.is_empty() {
-                                            if !task.output.is_empty() { task.output.push('\n'); }
+                                            if !task.output.is_empty() {
+                                                task.output.push('\n');
+                                            }
                                             task.output.push_str(text);
                                             task.progress_lines += 1;
                                         }
@@ -1850,7 +2378,9 @@ async fn run_cli_task(
                             }
                         }
                     } else {
-                        if !task.output.is_empty() { task.output.push('\n'); }
+                        if !task.output.is_empty() {
+                            task.output.push('\n');
+                        }
                         task.output.push_str(&partial);
                         task.progress_lines += 1;
                     }
@@ -1897,11 +2427,17 @@ async fn run_cli_task(
                         if !lines.is_empty() {
                             let mut store = tasks_c.write().await;
                             if let Some(task) = store.get_mut(&tid_c) {
-                                if task.status == TaskStatus::Cancelled { return stderr_buf; }
+                                if task.status == TaskStatus::Cancelled {
+                                    return stderr_buf;
+                                }
                                 for line in &lines {
-                                    if !stderr_buf.is_empty() { stderr_buf.push('\n'); }
+                                    if !stderr_buf.is_empty() {
+                                        stderr_buf.push('\n');
+                                    }
                                     stderr_buf.push_str(line);
-                                    if !task.output.is_empty() { task.output.push('\n'); }
+                                    if !task.output.is_empty() {
+                                        task.output.push('\n');
+                                    }
                                     task.output.push_str("[STDERR] ");
                                     task.output.push_str(line);
                                     task.progress_lines += 1;
@@ -1913,11 +2449,15 @@ async fn run_cli_task(
             }
             // Flush remaining partial data
             if !partial.is_empty() {
-                if !stderr_buf.is_empty() { stderr_buf.push('\n'); }
+                if !stderr_buf.is_empty() {
+                    stderr_buf.push('\n');
+                }
                 stderr_buf.push_str(&partial);
                 let mut store = tasks_c.write().await;
                 if let Some(task) = store.get_mut(&tid_c) {
-                    if !task.output.is_empty() { task.output.push('\n'); }
+                    if !task.output.is_empty() {
+                        task.output.push('\n');
+                    }
                     task.output.push_str("[STDERR] ");
                     task.output.push_str(&partial);
                     task.progress_lines += 1;
@@ -1939,7 +2479,10 @@ async fn run_cli_task(
         let stdout_drain = async {
             if let Some(h) = stdout_handle {
                 if tokio::time::timeout(reader_timeout, h).await.is_err() {
-                    warn!("stdout reader timed out 5s after child exit (task {})", task_id);
+                    warn!(
+                        "stdout reader timed out 5s after child exit (task {})",
+                        task_id
+                    );
                 }
             }
         };
@@ -1949,7 +2492,10 @@ async fn run_cli_task(
                     Ok(Ok(s)) => s,
                     Ok(Err(_)) => String::new(),
                     Err(_) => {
-                        warn!("stderr reader timed out 5s after child exit (task {})", task_id);
+                        warn!(
+                            "stderr reader timed out 5s after child exit (task {})",
+                            task_id
+                        );
                         String::new()
                     }
                 }
@@ -1984,8 +2530,10 @@ async fn run_cli_task(
             Ok(status) => {
                 task.status = TaskStatus::Failed;
                 let stderr_msg = if stderr_output.len() > 500 {
-                    format!("...{}", &stderr_output[stderr_output.len()-500..])
-                } else { stderr_output };
+                    format!("...{}", &stderr_output[stderr_output.len() - 500..])
+                } else {
+                    stderr_output
+                };
                 if ctx_limited {
                     let ctx_file = format!("{}\\context_resume_{}.json", history_dir(), task.id);
                     let resume = json!({
@@ -1998,10 +2546,21 @@ async fn run_cli_task(
                         "output_tail": if task.output.len() > 1000 { &task.output[task.output.len()-1000..] } else { &task.output },
                         "saved_at": Utc::now().to_rfc3339(),
                     });
-                    let _ = std::fs::write(&ctx_file, serde_json::to_string_pretty(&resume).unwrap_or_default());
-                    task.error = Some(format!("Context limit after {} steps. Resume saved: {}", task.steps.len(), ctx_file));
+                    let _ = std::fs::write(
+                        &ctx_file,
+                        serde_json::to_string_pretty(&resume).unwrap_or_default(),
+                    );
+                    task.error = Some(format!(
+                        "Context limit after {} steps. Resume saved: {}",
+                        task.steps.len(),
+                        ctx_file
+                    ));
                 } else {
-                    task.error = Some(format!("Exit code {}. Stderr: {}", status.code().unwrap_or(-1), stderr_msg));
+                    task.error = Some(format!(
+                        "Exit code {}. Stderr: {}",
+                        status.code().unwrap_or(-1),
+                        stderr_msg
+                    ));
                 }
             }
             Err(e) => {
@@ -2010,11 +2569,17 @@ async fn run_cli_task(
             }
         }
         task.completed_at = Some(Utc::now());
-        if task.status == TaskStatus::Done { Server::validate_output(task); }
+        if task.status == TaskStatus::Done {
+            Server::validate_output(task);
+        }
         Server::flag_extraction(task);
         // Item 18: retry/learn hooks
-        if task.status == TaskStatus::Failed { retry_task = Server::prepare_retry(task); }
-        if task.status == TaskStatus::Done && task.retry_of.is_some() { Server::learn_from_outcome(task); }
+        if task.status == TaskStatus::Failed {
+            retry_task = Server::prepare_retry(task);
+        }
+        if task.status == TaskStatus::Done && task.retry_of.is_some() {
+            Server::learn_from_outcome(task);
+        }
         Server::persist_task(task);
         Server::save_to_history(task);
         save_task_artifact(task);
@@ -2046,9 +2611,13 @@ async fn run_cli_task(
 
 /// Safe UTF-8 string truncation — never panics on multi-byte characters
 fn safe_truncate(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes { return s.to_string(); }
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
     let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
     format!("{}...", &s[..end])
 }
 
@@ -2065,7 +2634,10 @@ fn extract_safety_warning(output: &str) -> Option<String> {
 }
 
 fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
-    let auto_route = params.get("auto_route").and_then(|v| v.as_bool()).unwrap_or(false);
+    let auto_route = params
+        .get("auto_route")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let prompt_for_route = params.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
     let wd_for_route = params.get("working_dir").and_then(|v| v.as_str());
 
@@ -2090,18 +2662,27 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
             "gemini" => Backend::Gemini,
             "claude_code" | "claude" => Backend::ClaudeCode,
             "codex" => Backend::Codex,
-            _ => return Err(format!("Unknown backend '{}'. Use: gpt, gemini, claude_code, codex", backend_str)),
+            _ => {
+                return Err(format!(
+                    "Unknown backend '{}'. Use: gpt, gemini, claude_code, codex",
+                    backend_str
+                ))
+            }
         };
         (be, None)
     };
 
-    let raw_prompt = params.get("prompt")
+    let raw_prompt = params
+        .get("prompt")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'prompt' parameter")?
         .to_string();
 
     // v1.2.3: Fingerprint dedup check
-    let allow_duplicate = params.get("allow_duplicate").and_then(|v| v.as_bool()).unwrap_or(false);
+    let allow_duplicate = params
+        .get("allow_duplicate")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let working_dir_for_fp = params.get("working_dir").and_then(|v| v.as_str());
     let fp = compute_task_fingerprint(&backend, &raw_prompt, working_dir_for_fp);
 
@@ -2130,7 +2711,9 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
             if let Some(old_task) = wstore.get_mut(&old_id) {
                 // Will be set to superseded_by after new task is created below
                 old_task.watchdog_observations.push(format!(
-                    "[{}] Stalled {}s — superseded by new submission", Utc::now().format("%H:%M:%S"), stale_secs
+                    "[{}] Stalled {}s — superseded by new submission",
+                    Utc::now().format("%H:%M:%S"),
+                    stale_secs
                 ));
                 Server::persist_task(old_task);
             }
@@ -2143,18 +2726,27 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
 
     // CPC behavioral injection — prepend delegation rules to every task
     // Include active loaf context if one exists
-    let loaf_context = find_active_loaf().map(|(id, loaf)| {
-        let goal = loaf.get("goal").and_then(|g| g.as_str()).unwrap_or("?");
-        let phase_idx = loaf.get("current_phase").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
-        let phase_name = loaf.get("phases").and_then(|p| p.as_array())
-            .and_then(|p| p.get(phase_idx))
-            .and_then(|p| p.get("name")).and_then(|n| n.as_str()).unwrap_or("main");
-        format!(
-            "You are working on: {}. Loaf: {}. Phase: {}. \
+    let loaf_context = find_active_loaf()
+        .map(|(id, loaf)| {
+            let goal = loaf.get("goal").and_then(|g| g.as_str()).unwrap_or("?");
+            let phase_idx = loaf
+                .get("current_phase")
+                .and_then(|p| p.as_u64())
+                .unwrap_or(0) as usize;
+            let phase_name = loaf
+                .get("phases")
+                .and_then(|p| p.as_array())
+                .and_then(|p| p.get(phase_idx))
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("main");
+            format!(
+                "You are working on: {}. Loaf: {}. Phase: {}. \
              Report: what you changed, what you decided, what you discovered.\n",
-            goal, id, phase_name
-        )
-    }).unwrap_or_default();
+                goal, id, phase_name
+            )
+        })
+        .unwrap_or_default();
 
     let prompt = ensure_safety_validation(&format!(
         "[CPC DELEGATION CONTEXT]\n\
@@ -2167,13 +2759,17 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
     ));
 
     // §12: Specialist role handling — custom YAML roles override built-in
-    let role = params.get("role").and_then(|v| v.as_str()).map(String::from);
-    let role_prompt_owned: Option<String> = role.as_deref().and_then(|r| {
-        get_custom_role_prompt(r).or_else(|| get_role_prompt(r).map(String::from))
-    });
+    let role = params
+        .get("role")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let role_prompt_owned: Option<String> = role
+        .as_deref()
+        .and_then(|r| get_custom_role_prompt(r).or_else(|| get_role_prompt(r).map(String::from)));
     let role_prompt = role_prompt_owned.as_deref();
 
-    let user_system_prompt = params.get("system_prompt")
+    let user_system_prompt = params
+        .get("system_prompt")
         .and_then(|v| v.as_str())
         .map(String::from);
 
@@ -2185,20 +2781,29 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
     };
 
     // §13: Auto-artifact saving (default true)
-    let save_artifact = params.get("save_artifact").and_then(|v| v.as_bool()).unwrap_or(true);
+    let save_artifact = params
+        .get("save_artifact")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
-    let effort = params.get("effort").and_then(|v| v.as_str()).map(String::from);
-
-    let model = params.get("model")
+    let effort = params
+        .get("effort")
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    let working_dir = params.get("working_dir")
+    let model = params
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let working_dir = params
+        .get("working_dir")
         .and_then(|v| v.as_str())
         .map(String::from);
 
     // Per-task visibility override, falls back to dashboard prefs
-    let visible = params.get("visible")
+    let visible = params
+        .get("visible")
         .and_then(|v| v.as_bool())
         .unwrap_or(false); // MCP tasks default to background
 
@@ -2217,9 +2822,29 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
         created_at: Utc::now(),
         started_at: None,
         completed_at: None,
-        progress_lines: 0, steps: Vec::new(), last_activity: None, last_output_chunk_at: None, stall_detected: false, extraction_status: ExtractionStatus::None,
-        trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None, validation_status: ValidationStatus::NotChecked, assertions: Vec::new(), backed_up_files: Vec::new(), retry_count: 0, max_retries: 2, retry_of: None, error_context: None, input_tokens: 0, output_tokens: 0, cost_usd: 0.0,
-        on_complete: params.get("on_complete").and_then(|v| v.as_str()).map(String::from),
+        progress_lines: 0,
+        steps: Vec::new(),
+        last_activity: None,
+        last_output_chunk_at: None,
+        stall_detected: false,
+        extraction_status: ExtractionStatus::None,
+        trust_score: 0,
+        trust_level: TrustLevel::Low,
+        rollback_path: None,
+        validation_status: ValidationStatus::NotChecked,
+        assertions: Vec::new(),
+        backed_up_files: Vec::new(),
+        retry_count: 0,
+        max_retries: 2,
+        retry_of: None,
+        error_context: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0.0,
+        on_complete: params
+            .get("on_complete")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         role: role.clone(),
         save_artifact,
         rerun_of: None,
@@ -2230,7 +2855,10 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
         watchdog_observations: Vec::new(),
         fingerprint: Some(fp.clone()),
         superseded_by: None,
-        label: params.get("label").and_then(|v| v.as_str()).map(String::from),
+        label: params
+            .get("label")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         current_step: None,
         total_steps: None,
         current_step_desc: None,
@@ -2246,7 +2874,8 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
         let mut store = tasks.write().await;
         // v1.2.3: Link stalled duplicate if one was detected
         if !allow_duplicate {
-            let stalled_id: Option<String> = store.values()
+            let stalled_id: Option<String> = store
+                .values()
                 .find(|t| {
                     t.fingerprint.as_deref() == Some(fp.as_str())
                         && t.id != task_id
@@ -2286,13 +2915,15 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
             // Item 4: Inject breadcrumb context for Gemini continuity
             let gemini_prompt = if let Some(bc) = Server::read_breadcrumb_state() {
                 format!("{}\n\n{}", bc, prompt)
-            } else { prompt.clone() };
+            } else {
+                prompt.clone()
+            };
             let mut args = vec![
                 gemini_cmd().to_string(),
                 "-p".to_string(),
                 gemini_prompt.clone(),
                 "--yolo".to_string(),
-        ];
+            ];
             if let Some(m) = model {
                 args.push("--model".to_string());
                 args.push(m);
@@ -2327,7 +2958,7 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
                 r"C:\CPC".to_string(),
                 "--add-dir".to_string(),
                 r"C:\rust-mcp".to_string(),
-        ];
+            ];
             if let Some(m) = model {
                 args.push("--model".to_string());
                 args.push(m);
@@ -2338,17 +2969,35 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
             }
             vis_exe = Some(claude_code_cmd().to_string());
             vis_args = args.clone();
-            if run_background { server.runtime.spawn(run_cli_task(tasks_bg, tid, claude_code_cmd(), args, pipes.clone(), StdinMode::Null)); }
+            if run_background {
+                server.runtime.spawn(run_cli_task(
+                    tasks_bg,
+                    tid,
+                    claude_code_cmd(),
+                    args,
+                    pipes.clone(),
+                    StdinMode::Null,
+                ));
+            }
         }
         Backend::Codex => {
             let wd = working_dir.as_deref().unwrap_or(r"C:\rust-mcp");
             let args = vec![
-                "exec".into(), "--json".into(), "--skip-git-repo-check".into(),
-                "--full-auto".into(), "--cd".into(), wd.to_string(), prompt.clone(),
+                "exec".into(),
+                "--json".into(),
+                "--skip-git-repo-check".into(),
+                "--full-auto".into(),
+                "--cd".into(),
+                wd.to_string(),
+                prompt.clone(),
             ];
             vis_exe = Some(codex_cmd().to_string());
             vis_args = args.clone();
-            if run_background { server.runtime.spawn(run_codex_task(tasks_bg, tid, args, wd.to_string())); }
+            if run_background {
+                server
+                    .runtime
+                    .spawn(run_codex_task(tasks_bg, tid, args, wd.to_string()));
+            }
         }
     }
 
@@ -2357,7 +3006,11 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
     if visible {
         if let Some(exe) = vis_exe {
             let title: String = prompt.chars().take(60).collect();
-            let title = if prompt.len() > 60 { format!("{}...", title) } else { title };
+            let title = if prompt.len() > 60 {
+                format!("{}...", title)
+            } else {
+                title
+            };
             let wd = working_dir.as_deref().unwrap_or(r"C:\rust-mcp");
             spawn_visible_terminal(&title, &exe, &vis_args, wd);
         }
@@ -2372,7 +3025,8 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
             if let Some(t) = store.get_mut(&tid_done) {
                 t.status = TaskStatus::Running;
                 t.started_at = Some(Utc::now());
-                t.output = "Running in visible terminal - check terminal window for output".to_string();
+                t.output =
+                    "Running in visible terminal - check terminal window for output".to_string();
             }
         });
     }
@@ -2395,10 +3049,13 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
         });
     }
 
-
     // v1.2.3: wait=true blocking removed. task_submit always returns immediately.
     // timeout_secs kept as estimated_secs for informational purposes only.
-    if let Some(est) = params.get("timeout_secs").or(params.get("estimated_secs")).and_then(|v| v.as_u64()) {
+    if let Some(est) = params
+        .get("timeout_secs")
+        .or(params.get("estimated_secs"))
+        .and_then(|v| v.as_u64())
+    {
         result["estimated_secs"] = json!(est);
     }
 
@@ -2408,7 +3065,8 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
 /// Watch multiple tasks until all complete. Polls internally (zero LLM turns).
 /// Optionally sends MCP notifications for progress updates.
 fn handle_watch_tasks(server: &Server, params: Value) -> Result<Value, String> {
-    let task_ids: Vec<String> = params.get("task_ids")
+    let task_ids: Vec<String> = params
+        .get("task_ids")
         .and_then(|v| v.as_array())
         .ok_or("Missing 'task_ids' array")?
         .iter()
@@ -2419,15 +3077,18 @@ fn handle_watch_tasks(server: &Server, params: Value) -> Result<Value, String> {
         return Err("task_ids array is empty".into());
     }
 
-    let timeout_secs = params.get("timeout_secs")
+    let timeout_secs = params
+        .get("timeout_secs")
         .and_then(|v| v.as_u64())
         .unwrap_or(600);
 
-    let progress = params.get("progress")
+    let progress = params
+        .get("progress")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
-    let progress_interval_secs = params.get("progress_interval_secs")
+    let progress_interval_secs = params
+        .get("progress_interval_secs")
         .and_then(|v| v.as_u64())
         .unwrap_or(10);
 
@@ -2442,7 +3103,8 @@ fn handle_watch_tasks(server: &Server, params: Value) -> Result<Value, String> {
     }
 
     let start = std::time::Instant::now();
-    let mut last_progress = std::time::Instant::now() - std::time::Duration::from_secs(progress_interval_secs + 1);
+    let mut last_progress =
+        std::time::Instant::now() - std::time::Duration::from_secs(progress_interval_secs + 1);
     let mut last_steps: HashMap<String, usize> = HashMap::new();
 
     loop {
@@ -2456,7 +3118,10 @@ fn handle_watch_tasks(server: &Server, params: Value) -> Result<Value, String> {
 
         for tid in &task_ids {
             if let Some(task) = store.get(tid) {
-                let is_terminal = matches!(task.status, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled);
+                let is_terminal = matches!(
+                    task.status,
+                    TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled
+                );
                 if !is_terminal {
                     all_done = false;
                 }
@@ -2490,8 +3155,14 @@ fn handle_watch_tasks(server: &Server, params: Value) -> Result<Value, String> {
                             if cur_steps > prev_steps {
                                 format!("{} ({}): step {}", tid, task.backend, cur_steps)
                             } else {
-                                format!("{} ({}): running ({}s)", tid, task.backend,
-                                    task.started_at.map(|s| (Utc::now() - s).num_seconds()).unwrap_or(0))
+                                format!(
+                                    "{} ({}): running ({}s)",
+                                    tid,
+                                    task.backend,
+                                    task.started_at
+                                        .map(|s| (Utc::now() - s).num_seconds())
+                                        .unwrap_or(0)
+                                )
                             }
                         }
                         TaskStatus::Done => format!("{} ({}): done", tid, task.backend),
@@ -2530,12 +3201,15 @@ fn handle_watch_tasks(server: &Server, params: Value) -> Result<Value, String> {
 }
 
 fn handle_get_status(server: &Server, params: Value) -> Result<Value, String> {
-    let task_id = params.get("task_id")
+    let task_id = params
+        .get("task_id")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'task_id' parameter")?;
 
     let store = server.runtime.block_on(server.tasks.read());
-    let task = store.get(task_id).ok_or(format!("Task '{}' not found", task_id))?;
+    let task = store
+        .get(task_id)
+        .ok_or(format!("Task '{}' not found", task_id))?;
 
     let elapsed = task.started_at.map(|s| {
         let end = task.completed_at.unwrap_or_else(Utc::now);
@@ -2546,10 +3220,18 @@ fn handle_get_status(server: &Server, params: Value) -> Result<Value, String> {
     // A task is "stalled" only if it's Running, no tool is mid-flight, AND
     // >90s have passed since last activity. active_tool_running takes precedence
     // because long Write/Edit tools can legitimately run 60-90s silently.
-    let tool_running = task.steps.last().map(|s| s.status == "started").unwrap_or(false);
+    let tool_running = task
+        .steps
+        .last()
+        .map(|s| s.status == "started")
+        .unwrap_or(false);
     let stalled = if task.status == TaskStatus::Running && !tool_running {
-        task.last_activity.map(|la| Utc::now().signed_duration_since(la).num_seconds() > 90).unwrap_or(false)
-    } else { false };
+        task.last_activity
+            .map(|la| Utc::now().signed_duration_since(la).num_seconds() > 90)
+            .unwrap_or(false)
+    } else {
+        false
+    };
 
     // Human-friendly health enum — additive to stall_detected, more expressive.
     // Values: "done", "failed", "queued", "cancelled", "running_long_tool",
@@ -2563,25 +3245,45 @@ fn handle_get_status(server: &Server, params: Value) -> Result<Value, String> {
         TaskStatus::Orphaned => "orphaned",
         TaskStatus::Stalled => "stalled",
         TaskStatus::Running => {
-            if tool_running { "running_long_tool" }
-            else if stalled { "stalled" }
-            else if task.last_activity.map(|la| Utc::now().signed_duration_since(la).num_seconds() > 30).unwrap_or(false) { "idle" }
-            else { "running" }
+            if tool_running {
+                "running_long_tool"
+            } else if stalled {
+                "stalled"
+            } else if task
+                .last_activity
+                .map(|la| Utc::now().signed_duration_since(la).num_seconds() > 30)
+                .unwrap_or(false)
+            {
+                "idle"
+            } else {
+                "running"
+            }
         }
     };
 
     // Item 2: Recent steps summary
-    let recent_steps: Vec<Value> = task.steps.iter().rev().take(5).rev().map(|s| {
-        json!({"tool": s.tool, "status": s.status, "ts": s.timestamp.to_rfc3339()})
-    }).collect();
+    let recent_steps: Vec<Value> = task
+        .steps
+        .iter()
+        .rev()
+        .take(5)
+        .rev()
+        .map(|s| json!({"tool": s.tool, "status": s.status, "ts": s.timestamp.to_rfc3339()}))
+        .collect();
 
     // Item 3: Smart report for terminal states
     let output_preview = match task.status {
         TaskStatus::Done | TaskStatus::Failed => Server::generate_end_report(task),
-        _ => if task.output.len() > 300 {
-            format!("{}...\n\n[{} total chars, use get_output for full]", safe_truncate(&task.output, 300), task.output.len())
-        } else {
-            task.output.clone()
+        _ => {
+            if task.output.len() > 300 {
+                format!(
+                    "{}...\n\n[{} total chars, use get_output for full]",
+                    safe_truncate(&task.output, 300),
+                    task.output.len()
+                )
+            } else {
+                task.output.clone()
+            }
         }
     };
     let warning = extract_safety_warning(&task.output);
@@ -2612,21 +3314,25 @@ fn handle_get_status(server: &Server, params: Value) -> Result<Value, String> {
 }
 
 fn handle_get_output(server: &Server, params: Value) -> Result<Value, String> {
-    let task_id = params.get("task_id")
+    let task_id = params
+        .get("task_id")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'task_id' parameter")?;
 
-    let tail = params.get("tail")
+    let tail = params
+        .get("tail")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
 
     let store = server.runtime.block_on(server.tasks.read());
-    let task = store.get(task_id).ok_or(format!("Task '{}' not found", task_id))?;
+    let task = store
+        .get(task_id)
+        .ok_or(format!("Task '{}' not found", task_id))?;
 
     let output = if let Some(n) = tail {
         let lines: Vec<&str> = task.output.lines().collect();
         if lines.len() > n {
-            lines[lines.len()-n..].join("\n")
+            lines[lines.len() - n..].join("\n")
         } else {
             task.output.clone()
         }
@@ -2646,36 +3352,41 @@ fn handle_get_output(server: &Server, params: Value) -> Result<Value, String> {
 }
 
 fn handle_list_tasks(server: &Server, params: Value) -> Result<Value, String> {
-    let status_filter = params.get("status")
-        .and_then(|v| v.as_str());
+    let status_filter = params.get("status").and_then(|v| v.as_str());
 
-    let backend_filter = params.get("backend")
-        .and_then(|v| v.as_str());
+    let backend_filter = params.get("backend").and_then(|v| v.as_str());
 
-    let include_stalled = params.get("include_stalled")
+    let include_stalled = params
+        .get("include_stalled")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let limit = params.get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(20) as usize;
+    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
 
     let store = server.runtime.block_on(server.tasks.read());
 
-    let mut tasks: Vec<&Task> = store.values()
+    let mut tasks: Vec<&Task> = store
+        .values()
         .filter(|t| {
             if let Some(sf) = status_filter {
-                if t.status.to_string() != sf { return false; }
+                if t.status.to_string() != sf {
+                    return false;
+                }
             }
             if let Some(bf) = backend_filter {
-                if t.backend.to_string() != bf { return false; }
+                if t.backend.to_string() != bf {
+                    return false;
+                }
             }
             // v1.2.3: include_stalled filter — when true, only show stalled tasks
             if include_stalled {
                 let is_stalled = matches!(t.status, TaskStatus::Running | TaskStatus::Queued)
-                    && t.last_activity.map_or(true, |la| (Utc::now() - la).num_seconds() > 120)
+                    && t.last_activity
+                        .map_or(true, |la| (Utc::now() - la).num_seconds() > 120)
                     && t.superseded_by.is_none();
-                if !is_stalled { return false; }
+                if !is_stalled {
+                    return false;
+                }
             }
             true
         })
@@ -2684,23 +3395,26 @@ fn handle_list_tasks(server: &Server, params: Value) -> Result<Value, String> {
     tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     tasks.truncate(limit);
 
-    let summary: Vec<Value> = tasks.iter().map(|t| {
-        json!({
-            "task_id": t.id,
-            "backend": t.backend,
-            "status": t.status.to_string(),
-            "prompt_preview": if t.prompt.len() > 80 {
-                safe_truncate(&t.prompt, 80)
-            } else {
-                t.prompt.clone()
-            },
-            "created_at": t.created_at.to_rfc3339(),
-            "elapsed": t.started_at.map(|s| {
-                let end = t.completed_at.unwrap_or_else(Utc::now);
-                format!("{}s", (end - s).num_seconds())
-            }),
+    let summary: Vec<Value> = tasks
+        .iter()
+        .map(|t| {
+            json!({
+                "task_id": t.id,
+                "backend": t.backend,
+                "status": t.status.to_string(),
+                "prompt_preview": if t.prompt.len() > 80 {
+                    safe_truncate(&t.prompt, 80)
+                } else {
+                    t.prompt.clone()
+                },
+                "created_at": t.created_at.to_rfc3339(),
+                "elapsed": t.started_at.map(|s| {
+                    let end = t.completed_at.unwrap_or_else(Utc::now);
+                    format!("{}s", (end - s).num_seconds())
+                }),
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(json!({
         "total": store.len(),
@@ -2710,15 +3424,21 @@ fn handle_list_tasks(server: &Server, params: Value) -> Result<Value, String> {
 }
 
 fn handle_cancel_task(server: &Server, params: Value) -> Result<Value, String> {
-    let task_id = params.get("task_id")
+    let task_id = params
+        .get("task_id")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'task_id' parameter")?;
 
     let mut store = server.runtime.block_on(server.tasks.write());
-    let task = store.get_mut(task_id).ok_or(format!("Task '{}' not found", task_id))?;
+    let task = store
+        .get_mut(task_id)
+        .ok_or(format!("Task '{}' not found", task_id))?;
 
     if task.status != TaskStatus::Running && task.status != TaskStatus::Queued {
-        return Err(format!("Task '{}' is already {} - cannot cancel", task_id, task.status));
+        return Err(format!(
+            "Task '{}' is already {} - cannot cancel",
+            task_id, task.status
+        ));
     }
 
     // v1.2.3: Kill the child process tree before marking cancelled
@@ -2733,7 +3453,9 @@ fn handle_cancel_task(server: &Server, params: Value) -> Result<Value, String> {
     task.error = Some("Cancelled by user".into());
     if !killed_tree.is_empty() {
         task.watchdog_observations.push(format!(
-            "[{}] Cancel killed process tree: {:?}", Utc::now().format("%H:%M:%S"), killed_tree
+            "[{}] Cancel killed process tree: {:?}",
+            Utc::now().format("%H:%M:%S"),
+            killed_tree
         ));
     }
     Server::flag_extraction(task);
@@ -2756,7 +3478,7 @@ fn handle_cancel_task(server: &Server, params: Value) -> Result<Value, String> {
 /// Walk the process tree rooted at `root_pid`, kill descendants bottom-up, then kill root.
 /// Returns list of PIDs that were successfully terminated.
 fn kill_process_tree(root_pid: u32) -> Vec<u32> {
-    use sysinfo::{System, Pid, ProcessesToUpdate};
+    use sysinfo::{Pid, ProcessesToUpdate, System};
 
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::All, true);
@@ -2765,7 +3487,10 @@ fn kill_process_tree(root_pid: u32) -> Vec<u32> {
     let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
     for (pid, proc) in sys.processes() {
         if let Some(parent) = proc.parent() {
-            children_map.entry(parent.as_u32()).or_default().push(pid.as_u32());
+            children_map
+                .entry(parent.as_u32())
+                .or_default()
+                .push(pid.as_u32());
         }
     }
 
@@ -2806,31 +3531,39 @@ fn handle_task_poll(server: &Server, params: Value) -> Result<Value, String> {
 
     let store = server.runtime.block_on(server.tasks.read());
 
-    let completed_since: Vec<Value> = store.values()
+    let completed_since: Vec<Value> = store
+        .values()
         .filter(|t| {
-            matches!(t.status, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled)
-                && t.completed_at.map_or(false, |c| c > since)
+            matches!(
+                t.status,
+                TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled
+            ) && t.completed_at.map_or(false, |c| c > since)
         })
-        .map(|t| json!({
-            "task_id": t.id,
-            "backend": t.backend.to_string(),
-            "status": t.status.to_string(),
-            "prompt_preview": safe_truncate(&t.prompt, 80),
-            "completed_at": t.completed_at.map(|c| c.to_rfc3339()),
-            "error": t.error,
-        }))
+        .map(|t| {
+            json!({
+                "task_id": t.id,
+                "backend": t.backend.to_string(),
+                "status": t.status.to_string(),
+                "prompt_preview": safe_truncate(&t.prompt, 80),
+                "completed_at": t.completed_at.map(|c| c.to_rfc3339()),
+                "error": t.error,
+            })
+        })
         .collect();
 
-    let still_running: Vec<Value> = store.values()
+    let still_running: Vec<Value> = store
+        .values()
         .filter(|t| matches!(t.status, TaskStatus::Running | TaskStatus::Queued))
-        .map(|t| json!({
-            "task_id": t.id,
-            "backend": t.backend.to_string(),
-            "status": t.status.to_string(),
-            "prompt_preview": safe_truncate(&t.prompt, 80),
-            "elapsed": t.started_at.map(|s| format!("{}s", (Utc::now() - s).num_seconds())),
-            "child_pid": t.child_pid,
-        }))
+        .map(|t| {
+            json!({
+                "task_id": t.id,
+                "backend": t.backend.to_string(),
+                "status": t.status.to_string(),
+                "prompt_preview": safe_truncate(&t.prompt, 80),
+                "elapsed": t.started_at.map(|s| format!("{}s", (Utc::now() - s).num_seconds())),
+                "child_pid": t.child_pid,
+            })
+        })
         .collect();
 
     let status_bar = build_status_bar(&store);
@@ -2845,11 +3578,20 @@ fn handle_task_poll(server: &Server, params: Value) -> Result<Value, String> {
 
 /// Build a status_bar summary from task state + external state files.
 fn build_status_bar(store: &HashMap<String, Task>) -> Value {
-    let running = store.values().filter(|t| t.status == TaskStatus::Running).count();
-    let queued = store.values().filter(|t| t.status == TaskStatus::Queued).count();
+    let running = store
+        .values()
+        .filter(|t| t.status == TaskStatus::Running)
+        .count();
+    let queued = store
+        .values()
+        .filter(|t| t.status == TaskStatus::Queued)
+        .count();
     let unclaimed = 0usize; // reserved for future queue system
 
-    let manager_line = format!("{} running, {} queued, {} unclaimed", running, queued, unclaimed);
+    let manager_line = format!(
+        "{} running, {} queued, {} unclaimed",
+        running, queued, unclaimed
+    );
 
     // v1.2.7: Multi-breadcrumb support — read active.index.json for dashboard-aware multi-bc format.
     // Falls back through: CPC breadcrumb index → local active_operation.json → autonomous breadcrumb.jsonl
@@ -2858,7 +3600,10 @@ fn build_status_bar(store: &HashMap<String, Task>) -> Value {
     // Query local server state
     let loaf_line = read_active_loaf_summary();
 
-    let formatted = format!("mgr: {} | bc: {} | loaf: {}", manager_line, breadcrumb_line, loaf_line);
+    let formatted = format!(
+        "mgr: {} | bc: {} | loaf: {}",
+        manager_line, breadcrumb_line, loaf_line
+    );
 
     json!({
         "manager": manager_line,
@@ -2896,13 +3641,15 @@ fn read_breadcrumb_status_line_from(cpc_state: &str) -> String {
                     // Group by project_id for compact display
                     let mut by_project: HashMap<String, usize> = HashMap::new();
                     for (_, bc) in obj.iter() {
-                        let proj = bc.get("project_id")
+                        let proj = bc
+                            .get("project_id")
                             .and_then(|p| p.as_str())
                             .unwrap_or("ungrouped")
                             .to_string();
                         *by_project.entry(proj).or_insert(0) += 1;
                     }
-                    let mut breakdown: Vec<String> = by_project.iter()
+                    let mut breakdown: Vec<String> = by_project
+                        .iter()
                         .map(|(k, v)| format!("{}: {}", k, v))
                         .collect();
                     breakdown.sort(); // stable output
@@ -2919,7 +3666,8 @@ fn read_breadcrumb_status_line_from(cpc_state: &str) -> String {
     };
     if std::path::Path::new(&local_state_dir).exists() {
         let active_path = format!(r"{}\active_operation.json", local_state_dir);
-        if let Some(v) = std::fs::read_to_string(&active_path).ok()
+        if let Some(v) = std::fs::read_to_string(&active_path)
+            .ok()
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         {
             let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("?");
@@ -2966,7 +3714,11 @@ fn read_active_loaf_summary() -> String {
 }
 
 /// v1.2.3: Compute a dedup fingerprint from (backend, prompt[:200], working_dir).
-fn compute_task_fingerprint(backend: &Backend, raw_prompt: &str, working_dir: Option<&str>) -> String {
+fn compute_task_fingerprint(
+    backend: &Backend,
+    raw_prompt: &str,
+    working_dir: Option<&str>,
+) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
@@ -2984,15 +3736,21 @@ fn handle_status_bar(server: &Server, _params: Value) -> Result<Value, String> {
 }
 
 fn handle_pause_task(server: &Server, params: Value) -> Result<Value, String> {
-    let task_id = params.get("task_id")
+    let task_id = params
+        .get("task_id")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'task_id' parameter")?;
 
     let mut store = server.runtime.block_on(server.tasks.write());
-    let task = store.get_mut(task_id).ok_or(format!("Task '{}' not found", task_id))?;
+    let task = store
+        .get_mut(task_id)
+        .ok_or(format!("Task '{}' not found", task_id))?;
 
     if task.status != TaskStatus::Running && task.status != TaskStatus::Queued {
-        return Err(format!("Task '{}' is {} - can only pause running or queued tasks", task_id, task.status));
+        return Err(format!(
+            "Task '{}' is {} - can only pause running or queued tasks",
+            task_id, task.status
+        ));
     }
 
     task.status = TaskStatus::Paused;
@@ -3006,17 +3764,23 @@ fn handle_pause_task(server: &Server, params: Value) -> Result<Value, String> {
 }
 
 fn handle_resume_task(server: &Server, params: Value) -> Result<Value, String> {
-    let task_id = params.get("task_id")
+    let task_id = params
+        .get("task_id")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'task_id' parameter")?;
 
     let tasks = server.tasks.clone();
     let config = server.config.clone();
     let mut store = server.runtime.block_on(tasks.write());
-    let task = store.get_mut(task_id).ok_or(format!("Task '{}' not found", task_id))?;
+    let task = store
+        .get_mut(task_id)
+        .ok_or(format!("Task '{}' not found", task_id))?;
 
     if task.status != TaskStatus::Paused {
-        return Err(format!("Task '{}' is {} - can only resume paused tasks", task_id, task.status));
+        return Err(format!(
+            "Task '{}' is {} - can only resume paused tasks",
+            task_id, task.status
+        ));
     }
 
     task.status = TaskStatus::Queued;
@@ -3072,17 +3836,21 @@ fn handle_configure(server: &Server, params: Value) -> Result<Value, String> {
 }
 
 fn handle_cleanup(server: &Server, params: Value) -> Result<Value, String> {
-    let before_days = params.get("older_than_days")
+    let before_days = params
+        .get("older_than_days")
         .and_then(|v| v.as_u64())
         .unwrap_or(7);
 
     let cutoff = Utc::now() - chrono::Duration::days(before_days as i64);
 
     let mut store = server.runtime.block_on(server.tasks.write());
-    let to_remove: Vec<String> = store.iter()
+    let to_remove: Vec<String> = store
+        .iter()
         .filter(|(_, t)| {
             t.completed_at.map_or(false, |c| c < cutoff)
-                && (t.status == TaskStatus::Done || t.status == TaskStatus::Failed || t.status == TaskStatus::Cancelled)
+                && (t.status == TaskStatus::Done
+                    || t.status == TaskStatus::Failed
+                    || t.status == TaskStatus::Cancelled)
         })
         .map(|(id, _)| id.clone())
         .collect();
@@ -3105,15 +3873,23 @@ fn handle_cleanup(server: &Server, params: Value) -> Result<Value, String> {
 // Workflow Execution
 // ============================================================================
 
-fn run_workflow_step(backend: &str, prompt: &str, working_dir: &str, timeout_secs: u64) -> Result<String, String> {
+fn run_workflow_step(
+    backend: &str,
+    prompt: &str,
+    working_dir: &str,
+    timeout_secs: u64,
+) -> Result<String, String> {
     let (cmd, args): (&str, Vec<String>) = match backend {
         "claude_code" => {
             let a = vec![
-                "-p".to_string(), prompt.to_string(),
+                "-p".to_string(),
+                prompt.to_string(),
                 "--dangerously-skip-permissions".to_string(),
                 "--verbose".to_string(),
-                "--output-format".to_string(), "stream-json".to_string(),
-                "--add-dir".to_string(), working_dir.to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--add-dir".to_string(),
+                working_dir.to_string(),
             ];
             (claude_code_cmd(), a)
         }
@@ -3123,7 +3899,8 @@ fn run_workflow_step(backend: &str, prompt: &str, working_dir: &str, timeout_sec
                 "--json".to_string(),
                 "--skip-git-repo-check".to_string(),
                 "--dangerously-bypass-approvals-and-sandbox".to_string(),
-                "--cd".to_string(), working_dir.to_string(),
+                "--cd".to_string(),
+                working_dir.to_string(),
                 prompt.to_string(),
             ];
             (codex_cmd(), a)
@@ -3132,11 +3909,17 @@ fn run_workflow_step(backend: &str, prompt: &str, working_dir: &str, timeout_sec
             let a = vec![
                 gemini_cmd().to_string(),
                 "--yolo".to_string(),
-                "-p".to_string(), prompt.to_string(),
+                "-p".to_string(),
+                prompt.to_string(),
             ];
             (node_cmd(), a)
         }
-        _ => return Err(format!("Unknown backend: '{}'. Use: claude_code, codex, gemini", backend)),
+        _ => {
+            return Err(format!(
+                "Unknown backend: '{}'. Use: claude_code, codex, gemini",
+                backend
+            ))
+        }
     };
 
     let mut child = std::process::Command::new(cmd)
@@ -3166,12 +3949,15 @@ fn run_workflow_step(backend: &str, prompt: &str, working_dir: &str, timeout_sec
                     return Ok(stdout_buf);
                 } else {
                     let err_tail = if stderr_buf.len() > 500 {
-                        &stderr_buf[stderr_buf.len()-500..]
+                        &stderr_buf[stderr_buf.len() - 500..]
                     } else {
                         &stderr_buf
                     };
-                    return Err(format!("Exit code {}. Stderr: {}",
-                        status.code().unwrap_or(-1), err_tail));
+                    return Err(format!(
+                        "Exit code {}. Stderr: {}",
+                        status.code().unwrap_or(-1),
+                        err_tail
+                    ));
                 }
             }
             Ok(None) => {
@@ -3188,28 +3974,37 @@ fn run_workflow_step(backend: &str, prompt: &str, working_dir: &str, timeout_sec
 }
 
 fn handle_run_workflow(_server: &Server, args: Value) -> Result<Value, String> {
-    let name = args.get("name").and_then(|v| v.as_str())
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
         .ok_or("Missing 'name' parameter")?
         .to_string();
 
     let steps: Vec<WorkflowStep> = serde_json::from_value(
-        args.get("steps").cloned().ok_or("Missing 'steps' parameter")?
-    ).map_err(|e| format!("Invalid steps: {}", e))?;
+        args.get("steps")
+            .cloned()
+            .ok_or("Missing 'steps' parameter")?,
+    )
+    .map_err(|e| format!("Invalid steps: {}", e))?;
 
     if steps.is_empty() {
         return Err("Workflow must have at least one step".into());
     }
 
-    let max_total = args.get("max_total_attempts")
+    let max_total = args
+        .get("max_total_attempts")
         .and_then(|v| v.as_u64())
         .unwrap_or(15) as u32;
 
-    let log_results = args.get("log_results")
+    let log_results = args
+        .get("log_results")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
     // Build step lookup
-    let step_map: HashMap<String, usize> = steps.iter().enumerate()
+    let step_map: HashMap<String, usize> = steps
+        .iter()
+        .enumerate()
         .map(|(i, s)| (s.id.clone(), i))
         .collect();
 
@@ -3251,14 +4046,19 @@ fn handle_run_workflow(_server: &Server, args: Value) -> Result<Value, String> {
 
         // Try primary backend with retries
         for attempt in 0..=max_retries {
-            if total_attempts >= max_total { break; }
+            if total_attempts >= max_total {
+                break;
+            }
             total_attempts += 1;
             attempts += 1;
 
             let attempt_prompt = if attempt == 0 {
                 prompt.clone()
             } else {
-                format!("{}\n\n[RETRY {}/{}] Previous attempt failed: {}", prompt, attempt, max_retries, last_error)
+                format!(
+                    "{}\n\n[RETRY {}/{}] Previous attempt failed: {}",
+                    prompt, attempt, max_retries, last_error
+                )
             };
 
             match run_workflow_step(&step.backend, &attempt_prompt, working_dir, timeout_secs) {
@@ -3277,20 +4077,31 @@ fn handle_run_workflow(_server: &Server, args: Value) -> Result<Value, String> {
         if !success {
             if let Some(alts) = &step.alternatives {
                 for alt_backend in alts {
-                    if success || total_attempts >= max_total { break; }
+                    if success || total_attempts >= max_total {
+                        break;
+                    }
 
                     for alt_attempt in 0..2u32 {
-                        if total_attempts >= max_total { break; }
+                        if total_attempts >= max_total {
+                            break;
+                        }
                         total_attempts += 1;
                         attempts += 1;
 
                         let alt_prompt = if alt_attempt == 0 {
-                            format!("{}\n\n[ESCALATED from {}] Previous attempts failed: {}", prompt, step.backend, last_error)
+                            format!(
+                                "{}\n\n[ESCALATED from {}] Previous attempts failed: {}",
+                                prompt, step.backend, last_error
+                            )
                         } else {
-                            format!("{}\n\n[ESCALATED from {}, RETRY] Previous error: {}", prompt, step.backend, last_error)
+                            format!(
+                                "{}\n\n[ESCALATED from {}, RETRY] Previous error: {}",
+                                prompt, step.backend, last_error
+                            )
                         };
 
-                        match run_workflow_step(alt_backend, &alt_prompt, working_dir, timeout_secs) {
+                        match run_workflow_step(alt_backend, &alt_prompt, working_dir, timeout_secs)
+                        {
                             Ok(out) => {
                                 output = out;
                                 used_backend = alt_backend.clone();
@@ -3308,7 +4119,11 @@ fn handle_run_workflow(_server: &Server, args: Value) -> Result<Value, String> {
 
         // Record step result
         let output_preview = if output.len() > 500 {
-            format!("{}...[{} chars total]", safe_truncate(&output, 500), output.len())
+            format!(
+                "{}...[{} chars total]",
+                safe_truncate(&output, 500),
+                output.len()
+            )
         } else {
             output.clone()
         };
@@ -3398,23 +4213,30 @@ struct ParallelStepResult {
 }
 
 fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
-    let name = args.get("name").and_then(|v| v.as_str())
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
         .ok_or("Missing 'name' parameter")?
         .to_string();
 
     let steps: Vec<WorkflowStep> = serde_json::from_value(
-        args.get("steps").cloned().ok_or("Missing 'steps' parameter")?
-    ).map_err(|e| format!("Invalid steps: {}", e))?;
+        args.get("steps")
+            .cloned()
+            .ok_or("Missing 'steps' parameter")?,
+    )
+    .map_err(|e| format!("Invalid steps: {}", e))?;
 
     if steps.is_empty() {
         return Err("Workflow must have at least one step".into());
     }
 
-    let max_concurrent = args.get("max_concurrent")
+    let max_concurrent = args
+        .get("max_concurrent")
         .and_then(|v| v.as_u64())
         .unwrap_or(3) as usize;
 
-    let fail_fast = args.get("fail_fast")
+    let fail_fast = args
+        .get("fail_fast")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
@@ -3423,14 +4245,18 @@ fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
     for step in &steps {
         for dep in &step.depends_on {
             if !step_ids.contains(dep.as_str()) {
-                return Err(format!("Step '{}' depends_on unknown step '{}'", step.id, dep));
+                return Err(format!(
+                    "Step '{}' depends_on unknown step '{}'",
+                    step.id, dep
+                ));
             }
         }
     }
 
     // Detect cycles with simple visited/in-stack DFS
     {
-        let adj: HashMap<&str, &[String]> = steps.iter()
+        let adj: HashMap<&str, &[String]> = steps
+            .iter()
             .map(|s| (s.id.as_str(), s.depends_on.as_slice()))
             .collect();
         let mut visited = std::collections::HashSet::new();
@@ -3441,13 +4267,19 @@ fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
             visited: &mut std::collections::HashSet<&'a str>,
             stack: &mut std::collections::HashSet<&'a str>,
         ) -> bool {
-            if stack.contains(node) { return true; } // cycle
-            if visited.contains(node) { return false; }
+            if stack.contains(node) {
+                return true;
+            } // cycle
+            if visited.contains(node) {
+                return false;
+            }
             visited.insert(node);
             stack.insert(node);
             if let Some(deps) = adj.get(node) {
                 for dep in *deps {
-                    if dfs(dep.as_str(), adj, visited, stack) { return true; }
+                    if dfs(dep.as_str(), adj, visited, stack) {
+                        return true;
+                    }
                 }
             }
             stack.remove(node);
@@ -3455,21 +4287,32 @@ fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
         }
         for s in &steps {
             if dfs(s.id.as_str(), &adj, &mut visited, &mut stack) {
-                return Err(format!("Dependency cycle detected involving step '{}'", s.id));
+                return Err(format!(
+                    "Dependency cycle detected involving step '{}'",
+                    s.id
+                ));
             }
         }
     }
 
     // Build shared state
     let step_results: Arc<RwLock<HashMap<String, ParallelStepResult>>> = Arc::new(RwLock::new(
-        steps.iter().map(|s| (s.id.clone(), ParallelStepResult {
-            step_id: s.id.clone(),
-            status: "pending".into(),
-            backend: s.backend.clone(),
-            output: String::new(),
-            error: None,
-            attempts: 0,
-        })).collect()
+        steps
+            .iter()
+            .map(|s| {
+                (
+                    s.id.clone(),
+                    ParallelStepResult {
+                        step_id: s.id.clone(),
+                        status: "pending".into(),
+                        backend: s.backend.clone(),
+                        output: String::new(),
+                        error: None,
+                        attempts: 0,
+                    },
+                )
+            })
+            .collect(),
     ));
 
     let failed_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3480,17 +4323,37 @@ fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
     let wf_id = format!("wf_{}", Uuid::new_v4().to_string()[..8].to_string());
 
     let wf_task = Task {
-        id: wf_id.clone(), backend: Backend::ClaudeCode,
-        prompt: format!("Parallel workflow: {}", name), system_prompt: None,
-        model: None, working_dir: None, status: TaskStatus::Running,
-        output: String::new(), error: None, created_at: Utc::now(),
-        started_at: Some(Utc::now()), completed_at: None, progress_lines: 0,
-        steps: Vec::new(), last_activity: Some(Utc::now()), last_output_chunk_at: None, stall_detected: false,
-        extraction_status: ExtractionStatus::None, trust_score: 0,
-        trust_level: TrustLevel::Low, rollback_path: None,
-        validation_status: ValidationStatus::NotChecked, assertions: Vec::new(),
-        backed_up_files: Vec::new(), retry_count: 0, max_retries: 0,
-        retry_of: None, error_context: None, input_tokens: 0, output_tokens: 0, cost_usd: 0.0,
+        id: wf_id.clone(),
+        backend: Backend::ClaudeCode,
+        prompt: format!("Parallel workflow: {}", name),
+        system_prompt: None,
+        model: None,
+        working_dir: None,
+        status: TaskStatus::Running,
+        output: String::new(),
+        error: None,
+        created_at: Utc::now(),
+        started_at: Some(Utc::now()),
+        completed_at: None,
+        progress_lines: 0,
+        steps: Vec::new(),
+        last_activity: Some(Utc::now()),
+        last_output_chunk_at: None,
+        stall_detected: false,
+        extraction_status: ExtractionStatus::None,
+        trust_score: 0,
+        trust_level: TrustLevel::Low,
+        rollback_path: None,
+        validation_status: ValidationStatus::NotChecked,
+        assertions: Vec::new(),
+        backed_up_files: Vec::new(),
+        retry_count: 0,
+        max_retries: 0,
+        retry_of: None,
+        error_context: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0.0,
         on_complete: None,
         role: None,
         save_artifact: false,
@@ -3509,15 +4372,22 @@ fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
         live_activity: None,
         effort: None,
     };
-    rt.block_on(async { server.tasks.write().await.insert(wf_id.clone(), wf_task); });
+    rt.block_on(async {
+        server.tasks.write().await.insert(wf_id.clone(), wf_task);
+    });
 
     let tasks_ref = server.tasks.clone();
     let wf_id_bg = wf_id.clone();
     let steps_for_result = steps.clone();
     rt.spawn(async move {
         let result = run_parallel_workflow(
-            steps_arc, step_results.clone(), failed_flag.clone(), max_concurrent, fail_fast,
-        ).await;
+            steps_arc,
+            step_results.clone(),
+            failed_flag.clone(),
+            max_concurrent,
+            fail_fast,
+        )
+        .await;
 
         let final_results = step_results.read().await;
         let mut parts: Vec<String> = Vec::new();
@@ -3525,22 +4395,47 @@ fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
         for step in &steps_for_result {
             if let Some(r) = final_results.get(&step.id) {
                 match r.status.as_str() {
-                    "done" => done_c += 1, "failed" => fail_c += 1, "skipped" => skip_c += 1, _ => {}
+                    "done" => done_c += 1,
+                    "failed" => fail_c += 1,
+                    "skipped" => skip_c += 1,
+                    _ => {}
                 }
                 let preview = safe_truncate(&r.output, 300);
-                parts.push(format!("[{}] {} ({}): {}", r.status, r.step_id, r.backend, preview));
+                parts.push(format!(
+                    "[{}] {} ({}): {}",
+                    r.status, r.step_id, r.backend, preview
+                ));
             }
         }
-        let overall = if fail_c == 0 && skip_c == 0 { "done" } else if done_c > 0 { "partial" } else { "failed" };
-        let summary = format!("{}/{} done, {} failed, {} skipped\n{}", done_c, steps_for_result.len(), fail_c, skip_c, parts.join("\n"));
+        let overall = if fail_c == 0 && skip_c == 0 {
+            "done"
+        } else if done_c > 0 {
+            "partial"
+        } else {
+            "failed"
+        };
+        let summary = format!(
+            "{}/{} done, {} failed, {} skipped\n{}",
+            done_c,
+            steps_for_result.len(),
+            fail_c,
+            skip_c,
+            parts.join("\n")
+        );
 
         let mut tasks = tasks_ref.write().await;
         if let Some(t) = tasks.get_mut(&wf_id_bg) {
-            t.status = if overall == "done" { TaskStatus::Done } else { TaskStatus::Failed };
+            t.status = if overall == "done" {
+                TaskStatus::Done
+            } else {
+                TaskStatus::Failed
+            };
             t.output = summary;
             t.completed_at = Some(Utc::now());
             t.last_activity = Some(Utc::now());
-            if let Some(err) = result.err() { t.error = Some(err); }
+            if let Some(err) = result.err() {
+                t.error = Some(err);
+            }
         }
     });
 
@@ -3570,8 +4465,13 @@ async fn run_parallel_workflow(
     for step in steps.iter() {
         if step.depends_on.is_empty() {
             launch_step(
-                step.clone(), steps.clone(), results.clone(),
-                failed_flag.clone(), semaphore.clone(), tx.clone(), fail_fast,
+                step.clone(),
+                steps.clone(),
+                results.clone(),
+                failed_flag.clone(),
+                semaphore.clone(),
+                tx.clone(),
+                fail_fast,
             );
         }
     }
@@ -3579,7 +4479,9 @@ async fn run_parallel_workflow(
     // As each step completes, check what it unblocks
     while let Some(completed_id) = rx.recv().await {
         pending_count = pending_count.saturating_sub(1);
-        if pending_count == 0 { break; }
+        if pending_count == 0 {
+            break;
+        }
 
         // Find steps that depended on the completed one
         for step in steps.iter() {
@@ -3588,11 +4490,14 @@ async fn run_parallel_workflow(
             }
             // Check if ALL deps are now done
             let store = results.read().await;
-            let all_deps_met = step.depends_on.iter().all(|dep_id| {
-                store.get(dep_id).map_or(false, |r| r.status == "done")
-            });
+            let all_deps_met = step
+                .depends_on
+                .iter()
+                .all(|dep_id| store.get(dep_id).map_or(false, |r| r.status == "done"));
             let any_dep_failed = step.depends_on.iter().any(|dep_id| {
-                store.get(dep_id).map_or(false, |r| r.status == "failed" || r.status == "skipped")
+                store
+                    .get(dep_id)
+                    .map_or(false, |r| r.status == "failed" || r.status == "skipped")
             });
             let still_pending = store.get(&step.id).map_or(false, |r| r.status == "pending");
             drop(store);
@@ -3613,8 +4518,13 @@ async fn run_parallel_workflow(
                 let _ = tx.send(step.id.clone()).await;
             } else if all_deps_met {
                 launch_step(
-                    step.clone(), steps.clone(), results.clone(),
-                    failed_flag.clone(), semaphore.clone(), tx.clone(), fail_fast,
+                    step.clone(),
+                    steps.clone(),
+                    results.clone(),
+                    failed_flag.clone(),
+                    semaphore.clone(),
+                    tx.clone(),
+                    fail_fast,
                 );
             }
         }
@@ -3689,7 +4599,10 @@ fn launch_step(
             let attempt_prompt = if attempt == 0 {
                 prompt.clone()
             } else {
-                format!("{}\n\n[RETRY {}/{}] Previous attempt failed: {}", prompt, attempt, max_retries, last_error)
+                format!(
+                    "{}\n\n[RETRY {}/{}] Previous attempt failed: {}",
+                    prompt, attempt, max_retries, last_error
+                )
             };
 
             // run_workflow_step is sync/blocking — run on blocking thread pool
@@ -3698,10 +4611,21 @@ fn launch_step(
             let ap = attempt_prompt.clone();
             match tokio::task::spawn_blocking(move || {
                 run_workflow_step(&backend, &ap, &wd, timeout_secs)
-            }).await {
-                Ok(Ok(out)) => { output = out; success = true; break; }
-                Ok(Err(e)) => { last_error = e; }
-                Err(e) => { last_error = format!("Join error: {}", e); break; }
+            })
+            .await
+            {
+                Ok(Ok(out)) => {
+                    output = out;
+                    success = true;
+                    break;
+                }
+                Ok(Err(e)) => {
+                    last_error = e;
+                }
+                Err(e) => {
+                    last_error = format!("Join error: {}", e);
+                    break;
+                }
             }
         }
 
@@ -3709,13 +4633,21 @@ fn launch_step(
         if !success {
             if let Some(alts) = &step.alternatives {
                 for alt_backend in alts {
-                    if success { break; }
+                    if success {
+                        break;
+                    }
                     for alt_attempt in 0..2u32 {
                         attempts += 1;
                         let alt_prompt = if alt_attempt == 0 {
-                            format!("{}\n\n[ESCALATED from {}] Previous attempts failed: {}", prompt, step.backend, last_error)
+                            format!(
+                                "{}\n\n[ESCALATED from {}] Previous attempts failed: {}",
+                                prompt, step.backend, last_error
+                            )
                         } else {
-                            format!("{}\n\n[ESCALATED from {}, RETRY] Previous error: {}", prompt, step.backend, last_error)
+                            format!(
+                                "{}\n\n[ESCALATED from {}, RETRY] Previous error: {}",
+                                prompt, step.backend, last_error
+                            )
                         };
                         let ab = alt_backend.clone();
                         let wd = working_dir.to_string();
@@ -3723,10 +4655,22 @@ fn launch_step(
                         let ts = timeout_secs;
                         match tokio::task::spawn_blocking(move || {
                             run_workflow_step(&ab, &ap, &wd, ts)
-                        }).await {
-                            Ok(Ok(out)) => { output = out; used_backend = alt_backend.clone(); success = true; break; }
-                            Ok(Err(e)) => { last_error = e; }
-                            Err(e) => { last_error = format!("Join error: {}", e); break; }
+                        })
+                        .await
+                        {
+                            Ok(Ok(out)) => {
+                                output = out;
+                                used_backend = alt_backend.clone();
+                                success = true;
+                                break;
+                            }
+                            Ok(Err(e)) => {
+                                last_error = e;
+                            }
+                            Err(e) => {
+                                last_error = format!("Join error: {}", e);
+                                break;
+                            }
                         }
                     }
                 }
@@ -3737,7 +4681,11 @@ fn launch_step(
         {
             let mut store = results.write().await;
             if let Some(r) = store.get_mut(&step.id) {
-                r.status = if success { "done".into() } else { "failed".into() };
+                r.status = if success {
+                    "done".into()
+                } else {
+                    "failed".into()
+                };
                 r.backend = used_backend;
                 r.output = output;
                 r.error = if success { None } else { Some(last_error) };
@@ -3759,7 +4707,9 @@ fn launch_step(
 // ============================================================================
 
 fn handle_decompose_task(args: Value) -> Result<Value, String> {
-    let prompt = args.get("prompt").and_then(|v| v.as_str())
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
         .ok_or("Missing 'prompt'")?;
     let working_dir = args.get("working_dir").and_then(|v| v.as_str());
 
@@ -3770,29 +4720,46 @@ fn handle_decompose_task(args: Value) -> Result<Value, String> {
     for line in prompt.lines() {
         let trimmed = line.trim();
         if trimmed.len() > 2
-            && trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+            && trimmed
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
             && (trimmed.contains(". ") || trimmed.contains(") "))
         {
             if !buf.is_empty() {
                 raw_steps.push(buf.trim().to_string());
                 buf.clear();
             }
-            let content = trimmed.splitn(2, |c: char| c == '.' || c == ')')
-                .nth(1).unwrap_or(trimmed).trim();
+            let content = trimmed
+                .splitn(2, |c: char| c == '.' || c == ')')
+                .nth(1)
+                .unwrap_or(trimmed)
+                .trim();
             buf = content.to_string();
             found_numbered = true;
         } else {
-            if !buf.is_empty() { buf.push(' '); }
+            if !buf.is_empty() {
+                buf.push(' ');
+            }
             buf.push_str(trimmed);
         }
     }
-    if !buf.is_empty() { raw_steps.push(buf.trim().to_string()); }
+    if !buf.is_empty() {
+        raw_steps.push(buf.trim().to_string());
+    }
 
     // Fall back to connector splitting
     if !found_numbered || raw_steps.len() <= 1 {
         raw_steps.clear();
         let lower = prompt.to_lowercase();
-        let connectors = [" then ", " and then ", " after that, ", " next, ", " finally "];
+        let connectors = [
+            " then ",
+            " and then ",
+            " after that, ",
+            " next, ",
+            " finally ",
+        ];
         let mut splits: Vec<(usize, usize)> = Vec::new();
         for conn in &connectors {
             let mut from = 0;
@@ -3808,11 +4775,15 @@ fn handle_decompose_task(args: Value) -> Result<Value, String> {
             let mut last = 0;
             for (pos, len) in &splits {
                 let chunk = prompt[last..*pos].trim();
-                if !chunk.is_empty() { raw_steps.push(chunk.to_string()); }
+                if !chunk.is_empty() {
+                    raw_steps.push(chunk.to_string());
+                }
                 last = pos + len;
             }
             let tail = prompt[last..].trim();
-            if !tail.is_empty() { raw_steps.push(tail.to_string()); }
+            if !tail.is_empty() {
+                raw_steps.push(tail.to_string());
+            }
         }
     }
 
@@ -3839,14 +4810,25 @@ fn handle_decompose_task(args: Value) -> Result<Value, String> {
 }
 
 fn handle_save_template(args: Value) -> Result<Value, String> {
-    let name = args.get("name").and_then(|v| v.as_str()).ok_or("Missing 'name'")?;
-    let description = args.get("description").and_then(|v| v.as_str()).ok_or("Missing 'description'")?;
-    let steps: Vec<Value> = serde_json::from_value(
-        args.get("steps").cloned().ok_or("Missing 'steps'")?
-    ).map_err(|e| format!("Invalid steps: {}", e))?;
-    let backend = args.get("backend").and_then(|v| v.as_str()).unwrap_or("claude_code");
-    let params: HashMap<String, String> = args.get("parameters")
-        .and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'name'")?;
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'description'")?;
+    let steps: Vec<Value> =
+        serde_json::from_value(args.get("steps").cloned().ok_or("Missing 'steps'")?)
+            .map_err(|e| format!("Invalid steps: {}", e))?;
+    let backend = args
+        .get("backend")
+        .and_then(|v| v.as_str())
+        .unwrap_or("claude_code");
+    let params: HashMap<String, String> = args
+        .get("parameters")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
 
     let template = json!({
         "name": name, "description": description, "parameters": params,
@@ -3855,11 +4837,17 @@ fn handle_save_template(args: Value) -> Result<Value, String> {
     });
 
     std::fs::create_dir_all(workflow_patterns_dir()).map_err(|e| format!("mkdir: {}", e))?;
-    let path = format!("{}\\{}.json", workflow_patterns_dir(), name.replace(' ', "_"));
+    let path = format!(
+        "{}\\{}.json",
+        workflow_patterns_dir(),
+        name.replace(' ', "_")
+    );
     let content = serde_json::to_string_pretty(&template).map_err(|e| format!("json: {}", e))?;
     std::fs::write(&path, &content).map_err(|e| format!("write: {}", e))?;
 
-    Ok(json!({ "saved": path, "name": name, "steps": steps.len(), "parameters": params.keys().collect::<Vec<_>>() }))
+    Ok(
+        json!({ "saved": path, "name": name, "steps": steps.len(), "parameters": params.keys().collect::<Vec<_>>() }),
+    )
 }
 
 fn handle_list_templates(_args: Value) -> Result<Value, String> {
@@ -3869,7 +4857,12 @@ fn handle_list_templates(_args: Value) -> Result<Value, String> {
     let mut templates = Vec::new();
     if let Ok(entries) = std::fs::read_dir(workflow_patterns_dir()) {
         for entry in entries.flatten() {
-            if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+            if entry
+                .path()
+                .extension()
+                .map(|e| e == "json")
+                .unwrap_or(false)
+            {
                 if let Ok(c) = std::fs::read_to_string(entry.path()) {
                     if let Ok(t) = serde_json::from_str::<Value>(&c) {
                         templates.push(json!({
@@ -3891,26 +4884,47 @@ fn handle_list_templates(_args: Value) -> Result<Value, String> {
 }
 
 fn handle_run_template(server: &Server, args: Value) -> Result<Value, String> {
-    let name = args.get("name").and_then(|v| v.as_str()).ok_or("Missing 'name'")?;
-    let params: HashMap<String, String> = args.get("parameters")
-        .and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'name'")?;
+    let params: HashMap<String, String> = args
+        .get("parameters")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
     let working_dir = args.get("working_dir").and_then(|v| v.as_str());
 
-    let path = format!("{}\\{}.json", workflow_patterns_dir(), name.replace(' ', "_"));
+    let path = format!(
+        "{}\\{}.json",
+        workflow_patterns_dir(),
+        name.replace(' ', "_")
+    );
     let file_content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Template '{}' not found: {}", name, e))?;
-    let mut tmpl: Value = serde_json::from_str(&file_content)
-        .map_err(|e| format!("Invalid template: {}", e))?;
+    let mut tmpl: Value =
+        serde_json::from_str(&file_content).map_err(|e| format!("Invalid template: {}", e))?;
 
-    let steps = tmpl.get("steps").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let backend = tmpl.get("backend").and_then(|v| v.as_str()).unwrap_or("claude_code").to_string();
+    let steps = tmpl
+        .get("steps")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let backend = tmpl
+        .get("backend")
+        .and_then(|v| v.as_str())
+        .unwrap_or("claude_code")
+        .to_string();
 
     let mut combined = String::new();
     for step in &steps {
         if let Some(p) = step.get("prompt").and_then(|v| v.as_str()) {
             let mut expanded = p.to_string();
-            for (k, v) in &params { expanded = expanded.replace(&format!("{{{{{}}}}}", k), v); }
-            if !combined.is_empty() { combined.push_str("\n\n"); }
+            for (k, v) in &params {
+                expanded = expanded.replace(&format!("{{{{{}}}}}", k), v);
+            }
+            if !combined.is_empty() {
+                combined.push_str("\n\n");
+            }
             if let Some(id) = step.get("id").and_then(|v| v.as_str()) {
                 combined.push_str(&format!("Step {}: ", id));
             }
@@ -3918,8 +4932,13 @@ fn handle_run_template(server: &Server, args: Value) -> Result<Value, String> {
         }
     }
 
-    let wd = working_dir.map(String::from)
-        .or_else(|| tmpl.get("working_dir").and_then(|v| v.as_str()).map(String::from))
+    let wd = working_dir
+        .map(String::from)
+        .or_else(|| {
+            tmpl.get("working_dir")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
         .unwrap_or_else(|| r"C:\rust-mcp".to_string());
     let submit_args = json!({ "prompt": combined, "backend": backend, "working_dir": wd });
     let result = handle_submit_task(server, submit_args)?;
@@ -3945,16 +4964,28 @@ fn handle_explain_task(server: &Server, args: Value) -> Result<Value, String> {
     if let Some(tid) = task_id {
         let tasks = server.runtime.block_on(server.tasks.read());
         if let Some(task) = tasks.get(tid) {
-            let elapsed = task.created_at.signed_duration_since(chrono::Utc::now()).num_seconds().unsigned_abs();
-            let step_trail: Vec<String> = task.steps.iter()
-                .map(|s| format!("{} ({})", s.tool, s.status)).collect();
+            let elapsed = task
+                .created_at
+                .signed_duration_since(chrono::Utc::now())
+                .num_seconds()
+                .unsigned_abs();
+            let step_trail: Vec<String> = task
+                .steps
+                .iter()
+                .map(|s| format!("{} ({})", s.tool, s.status))
+                .collect();
             let explanation = format!(
                 "Task {}: You asked to {}. Backend: {}. Status: {}. Duration: {}s.{}",
                 tid,
                 safe_truncate(&task.prompt, 120),
-                task.backend, task.status, elapsed,
-                if step_trail.is_empty() { String::new() }
-                else { format!(" Steps: {}", step_trail.join(" -> ")) }
+                task.backend,
+                task.status,
+                elapsed,
+                if step_trail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Steps: {}", step_trail.join(" -> "))
+                }
             );
             return Ok(json!({
                 "task_id": tid, "explanation": explanation,
@@ -3970,15 +5001,24 @@ fn handle_explain_task(server: &Server, args: Value) -> Result<Value, String> {
     if let Ok(c) = std::fs::read_to_string(&history_path) {
         if let Ok(entries) = serde_json::from_str::<Vec<Value>>(&c) {
             let recent: Vec<&Value> = entries.iter().rev().take(last_n).collect();
-            let summaries: Vec<String> = recent.iter().map(|e| {
-                format!("{} - {} via {} ({} steps, {})",
-                    e.get("task_id").and_then(|v| v.as_str()).unwrap_or("?"),
-                    e.get("prompt_summary").and_then(|v| v.as_str()).unwrap_or("?"),
-                    e.get("backend").and_then(|v| v.as_str()).unwrap_or("?"),
-                    e.get("step_count").and_then(|v| v.as_u64()).unwrap_or(0),
-                    e.get("status").and_then(|v| v.as_str()).unwrap_or("?"))
-            }).collect();
-            return Ok(json!({ "recent_tasks": last_n, "total_in_history": entries.len(), "summary": summaries.join("\n") }));
+            let summaries: Vec<String> = recent
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{} - {} via {} ({} steps, {})",
+                        e.get("task_id").and_then(|v| v.as_str()).unwrap_or("?"),
+                        e.get("prompt_summary")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?"),
+                        e.get("backend").and_then(|v| v.as_str()).unwrap_or("?"),
+                        e.get("step_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                        e.get("status").and_then(|v| v.as_str()).unwrap_or("?")
+                    )
+                })
+                .collect();
+            return Ok(
+                json!({ "recent_tasks": last_n, "total_in_history": entries.len(), "summary": summaries.join("\n") }),
+            );
         }
     }
     Ok(json!({ "summary": "No task history found.", "recent_tasks": 0 }))
@@ -3998,13 +5038,23 @@ fn find_active_loaf() -> Option<(String, Value)> {
     let mut best: Option<(String, Value, String)> = None; // (id, value, created)
     for entry in dir.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
         if let Ok(content) = std::fs::read_to_string(&path) {
             if let Ok(v) = serde_json::from_str::<Value>(&content) {
                 if v.get("status").and_then(|s| s.as_str()) == Some("active") {
-                    let created = v.get("created").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                    let created = v
+                        .get("created")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     if best.as_ref().map_or(true, |(_, _, bc)| created > *bc) {
-                        let id = v.get("loaf_id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                        let id = v
+                            .get("loaf_id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         best = Some((id, v, created));
                     }
                 }
@@ -4015,9 +5065,13 @@ fn find_active_loaf() -> Option<(String, Value)> {
 }
 
 fn handle_loaf_create(_server: &Server, params: Value) -> Result<Value, String> {
-    let goal = params.get("goal").and_then(|v| v.as_str())
+    let goal = params
+        .get("goal")
+        .and_then(|v| v.as_str())
         .ok_or("Missing 'goal' parameter")?;
-    let project_name = params.get("project_name").and_then(|v| v.as_str())
+    let project_name = params
+        .get("project_name")
+        .and_then(|v| v.as_str())
         .ok_or("Missing 'project_name' parameter")?;
 
     let _ = std::fs::create_dir_all(loaves_dir());
@@ -4055,14 +5109,16 @@ fn handle_loaf_create(_server: &Server, params: Value) -> Result<Value, String> 
 }
 
 fn handle_loaf_update(_server: &Server, params: Value) -> Result<Value, String> {
-    let loaf_id = params.get("loaf_id").and_then(|v| v.as_str())
+    let loaf_id = params
+        .get("loaf_id")
+        .and_then(|v| v.as_str())
         .ok_or("Missing 'loaf_id' parameter")?;
 
     let path = loaf_path(loaf_id);
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read loaf '{}': {}", loaf_id, e))?;
-    let mut loaf: Value = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse loaf: {}", e))?;
+    let mut loaf: Value =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse loaf: {}", e))?;
 
     let now = Utc::now().to_rfc3339();
     // Collect breadcrumb events, push them all at the end to avoid borrow conflicts
@@ -4070,32 +5126,55 @@ fn handle_loaf_update(_server: &Server, params: Value) -> Result<Value, String> 
 
     // Task update
     if let Some(task_update) = params.get("task_update") {
-        let task_id = task_update.get("task_id").and_then(|t| t.as_str()).unwrap_or("").to_string();
-        let status = task_update.get("status").and_then(|s| s.as_str()).unwrap_or("unknown").to_string();
+        let task_id = task_update
+            .get("task_id")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+        let status = task_update
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("unknown")
+            .to_string();
 
-        let phase_idx = loaf.get("current_phase").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
+        let phase_idx = loaf
+            .get("current_phase")
+            .and_then(|p| p.as_u64())
+            .unwrap_or(0) as usize;
         if let Some(phases) = loaf.get_mut("phases").and_then(|p| p.as_array_mut()) {
             if let Some(phase) = phases.get_mut(phase_idx) {
                 if let Some(tasks) = phase.get_mut("tasks").and_then(|t| t.as_array_mut()) {
                     // Find existing task or add new one
-                    let existing = tasks.iter_mut().find(|t| t.get("task_id").and_then(|i| i.as_str()) == Some(&task_id));
+                    let existing = tasks
+                        .iter_mut()
+                        .find(|t| t.get("task_id").and_then(|i| i.as_str()) == Some(&task_id));
                     if let Some(t) = existing {
-                        if let Some(s) = task_update.get("status") { t["status"] = s.clone(); }
-                        if let Some(s) = task_update.get("output_summary") { t["output_summary"] = s.clone(); }
-                        if let Some(s) = task_update.get("files_changed") { t["files_changed"] = s.clone(); }
+                        if let Some(s) = task_update.get("status") {
+                            t["status"] = s.clone();
+                        }
+                        if let Some(s) = task_update.get("output_summary") {
+                            t["output_summary"] = s.clone();
+                        }
+                        if let Some(s) = task_update.get("files_changed") {
+                            t["files_changed"] = s.clone();
+                        }
                     } else {
                         tasks.push(task_update.clone());
                     }
 
                     // Update metadata counts
                     let total = tasks.len();
-                    let completed = tasks.iter().filter(|t| t.get("status").and_then(|s| s.as_str()) == Some("done")).count();
+                    let completed = tasks
+                        .iter()
+                        .filter(|t| t.get("status").and_then(|s| s.as_str()) == Some("done"))
+                        .count();
                     loaf["metadata"]["total_tasks"] = json!(total);
                     loaf["metadata"]["completed_tasks"] = json!(completed);
                 }
             }
         }
-        new_breadcrumbs.push(json!({"timestamp": &now, "event": format!("Task {} -> {}", task_id, status)}));
+        new_breadcrumbs
+            .push(json!({"timestamp": &now, "event": format!("Task {} -> {}", task_id, status)}));
 
         // Capture decisions from task
         if let Some(decisions) = task_update.get("decisions_made").and_then(|d| d.as_array()) {
@@ -4107,7 +5186,9 @@ fn handle_loaf_update(_server: &Server, params: Value) -> Result<Value, String> 
         }
         // Capture discoveries from task
         if let Some(discoveries) = task_update.get("discoveries").and_then(|d| d.as_array()) {
-            if let Some(loaf_discoveries) = loaf.get_mut("discoveries").and_then(|d| d.as_array_mut()) {
+            if let Some(loaf_discoveries) =
+                loaf.get_mut("discoveries").and_then(|d| d.as_array_mut())
+            {
                 for d in discoveries {
                     loaf_discoveries.push(json!({"what": d, "when": &now}));
                 }
@@ -4117,7 +5198,11 @@ fn handle_loaf_update(_server: &Server, params: Value) -> Result<Value, String> 
 
     // Direct decision
     if let Some(decision) = params.get("decision") {
-        let what = decision.get("what").and_then(|w| w.as_str()).unwrap_or("?").to_string();
+        let what = decision
+            .get("what")
+            .and_then(|w| w.as_str())
+            .unwrap_or("?")
+            .to_string();
         if let Some(decisions) = loaf.get_mut("decisions").and_then(|d| d.as_array_mut()) {
             decisions.push(json!({
                 "what": decision.get("what"),
@@ -4131,7 +5216,11 @@ fn handle_loaf_update(_server: &Server, params: Value) -> Result<Value, String> 
 
     // Direct discovery
     if let Some(discovery) = params.get("discovery") {
-        let what = discovery.get("what").and_then(|w| w.as_str()).unwrap_or("?").to_string();
+        let what = discovery
+            .get("what")
+            .and_then(|w| w.as_str())
+            .unwrap_or("?")
+            .to_string();
         if let Some(discoveries) = loaf.get_mut("discoveries").and_then(|d| d.as_array_mut()) {
             discoveries.push(json!({
                 "what": discovery.get("what"),
@@ -4151,7 +5240,10 @@ fn handle_loaf_update(_server: &Server, params: Value) -> Result<Value, String> 
     // Advance phase
     if let Some(ps) = params.get("phase_status").and_then(|s| s.as_str()) {
         if ps == "done" {
-            let phase_idx = loaf.get("current_phase").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
+            let phase_idx = loaf
+                .get("current_phase")
+                .and_then(|p| p.as_u64())
+                .unwrap_or(0) as usize;
             if let Some(phases) = loaf.get_mut("phases").and_then(|p| p.as_array_mut()) {
                 if let Some(phase) = phases.get_mut(phase_idx) {
                     phase["status"] = json!("done");
@@ -4159,13 +5251,26 @@ fn handle_loaf_update(_server: &Server, params: Value) -> Result<Value, String> 
                 let next = phase_idx + 1;
                 if next < phases.len() {
                     phases[next]["status"] = json!("active");
-                    let name = phases[next].get("name").and_then(|n| n.as_str()).unwrap_or("?").to_string();
-                    new_breadcrumbs.push(json!({"timestamp": &now, "event": format!("Phase advanced to: {}", name)}));
+                    let name = phases[next]
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    new_breadcrumbs.push(
+                        json!({"timestamp": &now, "event": format!("Phase advanced to: {}", name)}),
+                    );
                 }
             }
             // Set current_phase outside the phases borrow
-            let phase_idx = loaf.get("current_phase").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
-            let total_phases = loaf.get("phases").and_then(|p| p.as_array()).map(|p| p.len()).unwrap_or(0);
+            let phase_idx = loaf
+                .get("current_phase")
+                .and_then(|p| p.as_u64())
+                .unwrap_or(0) as usize;
+            let total_phases = loaf
+                .get("phases")
+                .and_then(|p| p.as_array())
+                .map(|p| p.len())
+                .unwrap_or(0);
             if phase_idx + 1 < total_phases {
                 loaf["current_phase"] = json!(phase_idx + 1);
             }
@@ -4180,9 +5285,19 @@ fn handle_loaf_update(_server: &Server, params: Value) -> Result<Value, String> 
     std::fs::write(&path, serde_json::to_string_pretty(&loaf).unwrap())
         .map_err(|e| format!("Failed to write loaf: {}", e))?;
 
-    let phase_name = loaf.get("phases").and_then(|p| p.as_array())
-        .and_then(|p| p.get(loaf.get("current_phase").and_then(|i| i.as_u64()).unwrap_or(0) as usize))
-        .and_then(|p| p.get("name")).and_then(|n| n.as_str()).unwrap_or("?");
+    let phase_name = loaf
+        .get("phases")
+        .and_then(|p| p.as_array())
+        .and_then(|p| {
+            p.get(
+                loaf.get("current_phase")
+                    .and_then(|i| i.as_u64())
+                    .unwrap_or(0) as usize,
+            )
+        })
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("?");
 
     Ok(json!({
         "loaf_id": loaf_id,
@@ -4197,26 +5312,44 @@ fn handle_loaf_status(_server: &Server, params: Value) -> Result<Value, String> 
         let path = loaf_path(id);
         let content = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read loaf '{}': {}", id, e))?;
-        let v: Value = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse loaf: {}", e))?;
+        let v: Value =
+            serde_json::from_str(&content).map_err(|e| format!("Failed to parse loaf: {}", e))?;
         (id.to_string(), v)
     } else {
         find_active_loaf().ok_or("No active loaf found")?
     };
 
-    let phase_idx = loaf.get("current_phase").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
-    let phase_name = loaf.get("phases").and_then(|p| p.as_array())
+    let phase_idx = loaf
+        .get("current_phase")
+        .and_then(|p| p.as_u64())
+        .unwrap_or(0) as usize;
+    let phase_name = loaf
+        .get("phases")
+        .and_then(|p| p.as_array())
         .and_then(|p| p.get(phase_idx))
-        .and_then(|p| p.get("name")).and_then(|n| n.as_str()).unwrap_or("?");
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("?");
 
-    let total = loaf.get("metadata").and_then(|m| m.get("total_tasks")).and_then(|t| t.as_u64()).unwrap_or(0);
-    let completed = loaf.get("metadata").and_then(|m| m.get("completed_tasks")).and_then(|t| t.as_u64()).unwrap_or(0);
+    let total = loaf
+        .get("metadata")
+        .and_then(|m| m.get("total_tasks"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
+    let completed = loaf
+        .get("metadata")
+        .and_then(|m| m.get("completed_tasks"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
 
-    let breadcrumbs = loaf.get("breadcrumbs").and_then(|b| b.as_array())
+    let breadcrumbs = loaf
+        .get("breadcrumbs")
+        .and_then(|b| b.as_array())
         .map(|b| {
             let skip = if b.len() > 5 { b.len() - 5 } else { 0 };
             b.iter().skip(skip).cloned().collect::<Vec<_>>()
-        }).unwrap_or_default();
+        })
+        .unwrap_or_default();
 
     Ok(json!({
         "loaf_id": loaf_id,
@@ -4234,14 +5367,16 @@ fn handle_loaf_status(_server: &Server, params: Value) -> Result<Value, String> 
 }
 
 fn handle_loaf_close(_server: &Server, params: Value) -> Result<Value, String> {
-    let loaf_id = params.get("loaf_id").and_then(|v| v.as_str())
+    let loaf_id = params
+        .get("loaf_id")
+        .and_then(|v| v.as_str())
         .ok_or("Missing 'loaf_id' parameter")?;
 
     let path = loaf_path(loaf_id);
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read loaf '{}': {}", loaf_id, e))?;
-    let mut loaf: Value = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse loaf: {}", e))?;
+    let mut loaf: Value =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse loaf: {}", e))?;
 
     let now = Utc::now().to_rfc3339();
     loaf["status"] = json!("completed");
@@ -4255,8 +5390,16 @@ fn handle_loaf_close(_server: &Server, params: Value) -> Result<Value, String> {
         .map_err(|e| format!("Failed to write archive: {}", e))?;
     let _ = std::fs::remove_file(&path);
 
-    let total = loaf.get("metadata").and_then(|m| m.get("total_tasks")).and_then(|t| t.as_u64()).unwrap_or(0);
-    let completed = loaf.get("metadata").and_then(|m| m.get("completed_tasks")).and_then(|t| t.as_u64()).unwrap_or(0);
+    let total = loaf
+        .get("metadata")
+        .and_then(|m| m.get("total_tasks"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
+    let completed = loaf
+        .get("metadata")
+        .and_then(|m| m.get("completed_tasks"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
 
     Ok(json!({
         "loaf_id": loaf_id,
@@ -4275,7 +5418,10 @@ fn handle_loaf_close(_server: &Server, params: Value) -> Result<Value, String> {
 // ============================================================================
 
 fn handle_list_sessions(server: &Server, args: Value) -> Result<Value, String> {
-    let include_stalled = args.get("include_stalled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let include_stalled = args
+        .get("include_stalled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let session_dir = std::path::Path::new(session_dir());
     if !session_dir.exists() {
         return Ok(json!({"sessions": [], "count": 0}));
@@ -4286,7 +5432,9 @@ fn handle_list_sessions(server: &Server, args: Value) -> Result<Value, String> {
     let mut sessions = Vec::new();
     for entry in std::fs::read_dir(session_dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
-        if !entry.path().is_dir() { continue; }
+        if !entry.path().is_dir() {
+            continue;
+        }
         let meta_path = entry.path().join("meta.json");
         if meta_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&meta_path) {
@@ -4295,8 +5443,11 @@ fn handle_list_sessions(server: &Server, args: Value) -> Result<Value, String> {
 
                     // v1.2.3: Use task store for authoritative alive/pid (heartbeat updates meta.json)
                     // v1.2.7: Also track orphaned status (child alive but pipes gone after restart)
-                    let (alive, orphaned, pid, last_activity) = if let Some(task) = store.get(&*session_id) {
-                        let is_alive = matches!(task.status, TaskStatus::Running | TaskStatus::Queued);
+                    let (alive, orphaned, pid, last_activity) = if let Some(task) =
+                        store.get(&*session_id)
+                    {
+                        let is_alive =
+                            matches!(task.status, TaskStatus::Running | TaskStatus::Queued);
                         let is_orphaned = task.status == TaskStatus::Orphaned;
                         (is_alive, is_orphaned, task.child_pid, task.last_activity)
                     } else {
@@ -4309,8 +5460,11 @@ fn handle_list_sessions(server: &Server, args: Value) -> Result<Value, String> {
                     // v1.2.3: include_stalled filter — only show stalled sessions
                     if include_stalled {
                         let is_stalled = alive
-                            && last_activity.map_or(true, |la| (Utc::now() - la).num_seconds() > 120);
-                        if !is_stalled { continue; }
+                            && last_activity
+                                .map_or(true, |la| (Utc::now() - la).num_seconds() > 120);
+                        if !is_stalled {
+                            continue;
+                        }
                     }
 
                     sessions.push(json!({
@@ -4340,11 +5494,18 @@ fn handle_list_sessions(server: &Server, args: Value) -> Result<Value, String> {
 
 fn handle_get_analytics(server: &Server, args: Value) -> Result<Value, String> {
     let store = server.runtime.block_on(server.tasks.read());
-    let backend_filter = args.get("backend").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let since = args.get("since").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let backend_filter = args
+        .get("backend")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let since = args
+        .get("since")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     // (total, success, cost, total_duration_ms)
-    let mut by_backend: std::collections::HashMap<String, (u32, u32, f64, u64)> = std::collections::HashMap::new();
+    let mut by_backend: std::collections::HashMap<String, (u32, u32, f64, u64)> =
+        std::collections::HashMap::new();
     let mut total_tasks = 0u32;
     let mut total_success = 0u32;
     let mut total_cost = 0.0f64;
@@ -4356,11 +5517,15 @@ fn handle_get_analytics(server: &Server, args: Value) -> Result<Value, String> {
         let backend_str = task.backend.to_string();
 
         if let Some(ref bf) = backend_filter {
-            if backend_str != *bf { continue; }
+            if backend_str != *bf {
+                continue;
+            }
         }
         if let Some(ref since_str) = since {
             if let Ok(since_dt) = chrono::DateTime::parse_from_rfc3339(since_str) {
-                if task.created_at < since_dt { continue; }
+                if task.created_at < since_dt {
+                    continue;
+                }
             }
         }
 
@@ -4370,11 +5535,17 @@ fn handle_get_analytics(server: &Server, args: Value) -> Result<Value, String> {
         total_tokens_out += task.output_tokens;
 
         let is_success = task.status == TaskStatus::Done;
-        if is_success { total_success += 1; }
+        if is_success {
+            total_success += 1;
+        }
 
-        let entry = by_backend.entry(backend_str.clone()).or_insert((0, 0, 0.0, 0));
+        let entry = by_backend
+            .entry(backend_str.clone())
+            .or_insert((0, 0, 0.0, 0));
         entry.0 += 1;
-        if is_success { entry.1 += 1; }
+        if is_success {
+            entry.1 += 1;
+        }
         entry.2 += task.cost_usd;
 
         // Calculate duration from started_at -> completed_at
@@ -4421,9 +5592,14 @@ fn handle_get_analytics(server: &Server, args: Value) -> Result<Value, String> {
 // ============================================================================
 
 fn handle_run_analyzer(args: Value) -> Result<Value, String> {
-    let volumes = args.get("volumes_path").and_then(|v| v.as_str())
-        .unwrap_or(r"C:\My Drive\Volumes").to_string();
-    let history = args.get("history_path").and_then(|v| v.as_str())
+    let volumes = args
+        .get("volumes_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or(r"C:\My Drive\Volumes")
+        .to_string();
+    let history = args
+        .get("history_path")
+        .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("{}\\task_history.json", history_dir()));
     analyzer::run_analyzer(&volumes, &history)
@@ -4439,37 +5615,37 @@ fn get_role_prompt(role: &str) -> Option<&'static str> {
             "You are a software architect. Focus on system design, component boundaries, \
              data flow, and API contracts. Evaluate trade-offs between approaches. \
              Produce diagrams or pseudocode, not full implementations. \
-             Flag coupling risks and scalability concerns."
+             Flag coupling risks and scalability concerns.",
         ),
         "implementer" => Some(
             "You are an implementer. Write production-quality code that follows existing \
              patterns in the codebase. Keep changes minimal and focused. \
-             Run builds and tests after changes. Report what files you modified."
+             Run builds and tests after changes. Report what files you modified.",
         ),
         "tester" => Some(
             "You are a test engineer. Write thorough tests covering happy paths, edge cases, \
              and error conditions. Prefer integration tests over mocks. \
-             Report coverage gaps and suggest additional test scenarios."
+             Report coverage gaps and suggest additional test scenarios.",
         ),
         "reviewer" => Some(
             "You are a code reviewer. Read the code carefully and identify bugs, security \
              issues, performance problems, and style violations. Be specific about line \
-             numbers and suggest concrete fixes. Prioritize findings by severity."
+             numbers and suggest concrete fixes. Prioritize findings by severity.",
         ),
         "documenter" => Some(
             "You are a technical writer. Write clear, concise documentation for the code \
              and systems you examine. Produce READMEs, inline comments, API docs, and \
-             architecture decision records as appropriate. Target the intended audience."
+             architecture decision records as appropriate. Target the intended audience.",
         ),
         "debugger" => Some(
             "You are a debugger. Systematically narrow down the root cause of issues. \
              Add logging, inspect state, form hypotheses, and test them. \
-             Document the investigation path so others can follow your reasoning."
+             Document the investigation path so others can follow your reasoning.",
         ),
         "security" => Some(
             "You are a security analyst. Review code for OWASP top 10 vulnerabilities, \
              injection risks, authentication/authorization flaws, and data exposure. \
-             Check dependencies for known CVEs. Report findings with severity ratings."
+             Check dependencies for known CVEs. Report findings with severity ratings.",
         ),
         _ => None,
     }
@@ -4497,21 +5673,29 @@ struct CustomRole {
 }
 
 fn custom_roles_dir() -> std::path::PathBuf {
-    let volumes = std::env::var("VOLUMES_PATH")
-        .unwrap_or_else(|_| r"C:\My Drive\Volumes".to_string());
-    std::path::PathBuf::from(volumes).join("scripts").join("roles")
+    let volumes =
+        std::env::var("VOLUMES_PATH").unwrap_or_else(|_| r"C:\My Drive\Volumes".to_string());
+    std::path::PathBuf::from(volumes)
+        .join("scripts")
+        .join("roles")
 }
 
 fn load_custom_roles() -> Vec<CustomRole> {
     let dir = custom_roles_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else { return vec![] };
-    entries.filter_map(|e| {
-        let e = e.ok()?;
-        let path = e.path();
-        if path.extension().and_then(|x| x.to_str()) != Some("yaml") { return None; }
-        let content = std::fs::read_to_string(&path).ok()?;
-        serde_yaml::from_str::<CustomRole>(&content).ok()
-    }).collect()
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return vec![];
+    };
+    entries
+        .filter_map(|e| {
+            let e = e.ok()?;
+            let path = e.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("yaml") {
+                return None;
+            }
+            let content = std::fs::read_to_string(&path).ok()?;
+            serde_yaml::from_str::<CustomRole>(&content).ok()
+        })
+        .collect()
 }
 
 fn get_custom_role_prompt(role: &str) -> Option<String> {
@@ -4535,17 +5719,28 @@ fn handle_role_list(_args: Value) -> Result<Value, String> {
         }));
     }
     let count = roles.len();
-    Ok(json!({ "roles": roles, "count": count, "built_in": 7, "custom": custom_count, "note": "Pass role name to task_submit's 'role' parameter" }))
+    Ok(
+        json!({ "roles": roles, "count": count, "built_in": 7, "custom": custom_count, "note": "Pass role name to task_submit's 'role' parameter" }),
+    )
 }
 
 fn handle_role_create(args: Value) -> Result<Value, String> {
-    let name = args.get("name").and_then(|v| v.as_str())
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
         .ok_or("Missing required param: name")?;
-    let prompt = args.get("prompt").and_then(|v| v.as_str())
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
         .ok_or("Missing required param: prompt")?;
-    let expertise: Vec<String> = args.get("expertise")
+    let expertise: Vec<String> = args
+        .get("expertise")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     // Validate name (alphanumeric + underscore only)
@@ -4559,8 +5754,16 @@ fn handle_role_create(args: Value) -> Result<Value, String> {
     let yaml_content = format!(
         "name: {}\nprompt: |\n{}\nexpertise:\n{}",
         name,
-        prompt.lines().map(|l| format!("  {}", l)).collect::<Vec<_>>().join("\n"),
-        expertise.iter().map(|e| format!("  - {}", e)).collect::<Vec<_>>().join("\n"),
+        prompt
+            .lines()
+            .map(|l| format!("  {}", l))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        expertise
+            .iter()
+            .map(|e| format!("  - {}", e))
+            .collect::<Vec<_>>()
+            .join("\n"),
     );
 
     let path = dir.join(format!("{}.yaml", name));
@@ -4570,7 +5773,9 @@ fn handle_role_create(args: Value) -> Result<Value, String> {
 }
 
 fn handle_role_delete(args: Value) -> Result<Value, String> {
-    let name = args.get("name").and_then(|v| v.as_str())
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
         .ok_or("Missing required param: name")?;
     let path = custom_roles_dir().join(format!("{}.yaml", name));
     if !path.exists() {
@@ -4586,13 +5791,19 @@ fn handle_role_delete(args: Value) -> Result<Value, String> {
 // ============================================================================
 
 fn save_task_artifact(task: &Task) {
-    if !task.save_artifact { return; }
-    if task.status != TaskStatus::Done { return; }
+    if !task.save_artifact {
+        return;
+    }
+    if task.status != TaskStatus::Done {
+        return;
+    }
 
-    let volumes_path = std::env::var("VOLUMES_PATH")
-        .unwrap_or_else(|_| r"C:\My Drive\Volumes".to_string());
+    let volumes_path =
+        std::env::var("VOLUMES_PATH").unwrap_or_else(|_| r"C:\My Drive\Volumes".to_string());
     let artifacts_dir = std::path::Path::new(&volumes_path).join("artifacts");
-    if std::fs::create_dir_all(&artifacts_dir).is_err() { return; }
+    if std::fs::create_dir_all(&artifacts_dir).is_err() {
+        return;
+    }
 
     let date = Utc::now().format("%Y-%m-%d").to_string();
     let role_tag = task.role.as_deref().unwrap_or("none");
@@ -4607,12 +5818,7 @@ fn save_task_artifact(task: &Task) {
          - Date: {}\n\
          - Prompt: {}\n\
          ---\n\n{}\n",
-        task.id,
-        task.backend,
-        role_tag,
-        date,
-        prompt_preview,
-        task.output
+        task.id, task.backend, role_tag, date, prompt_preview, task.output
     );
 
     let _ = std::fs::write(&path, &content);
@@ -4669,7 +5875,11 @@ fn handle_tool_call(server: &Server, tool: &str, args: Value) -> Result<Value, S
                 let meta_file = format!("{}\\{}\\meta.json", session_dir(), sid);
                 if let Ok(content) = std::fs::read_to_string(&meta_file) {
                     if let Ok(meta) = serde_json::from_str::<Value>(&content) {
-                        if meta.get("notify_on_destroy").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        if meta
+                            .get("notify_on_destroy")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
                             fire_notify_for_session(
                                 sid,
                                 meta.get("created_at").and_then(|v| v.as_str()),
@@ -4686,7 +5896,10 @@ fn handle_tool_call(server: &Server, tool: &str, args: Value) -> Result<Value, S
                 if let Ok(content) = std::fs::read_to_string(&meta_file2) {
                     if let Ok(mut meta) = serde_json::from_str::<Value>(&content) {
                         meta["alive"] = json!(false);
-                        let _ = std::fs::write(&meta_file2, serde_json::to_string_pretty(&meta).unwrap_or_default());
+                        let _ = std::fs::write(
+                            &meta_file2,
+                            serde_json::to_string_pretty(&meta).unwrap_or_default(),
+                        );
                     }
                 }
             }
@@ -4696,15 +5909,15 @@ fn handle_tool_call(server: &Server, tool: &str, args: Value) -> Result<Value, S
                 mapped["task_id"] = sid;
             }
             handle_cancel_task(server, mapped)
-        },
+        }
         "get_analytics" => handle_get_analytics(server, args),
         "run_analyzer" => handle_run_analyzer(args),
         "role_list" | "list_roles" => handle_role_list(args),
         "role_create" | "create_role" => handle_role_create(args),
         "role_delete" | "delete_role" => handle_role_delete(args),
         "notify" => Ok(handle_notify(args)),
-        "dashboard_open"   => Ok(handle_dashboard_open()),
-        "dashboard_stop"   => Ok(handle_dashboard_stop()),
+        "dashboard_open" => Ok(handle_dashboard_open()),
+        "dashboard_stop" => Ok(handle_dashboard_stop()),
         "dashboard_status" => Ok(handle_dashboard_status()),
         _ => Err(format!("Unknown tool: {}", tool)),
     }
@@ -4732,14 +5945,16 @@ fn handle_dashboard_stop() -> Value {
             DASHBOARD_PORT.store(0, Ordering::SeqCst);
             json!({"stopped": true, "message": "Dashboard listener aborted."})
         }
-        None => json!({"stopped": false, "message": "Dashboard was not running or already stopped."})
+        None => {
+            json!({"stopped": false, "message": "Dashboard was not running or already stopped."})
+        }
     }
 }
 
 fn handle_dashboard_status() -> Value {
     let running = DASHBOARD_RUNNING.load(Ordering::Relaxed);
-    let port    = DASHBOARD_PORT.load(Ordering::Relaxed);
-    let url     = if running && port > 0 {
+    let port = DASHBOARD_PORT.load(Ordering::Relaxed);
+    let url = if running && port > 0 {
         format!("http://127.0.0.1:{}/", port)
     } else {
         String::new()
@@ -4771,20 +5986,40 @@ fn handle_review_extractions(server: &Server, _args: Value) -> Result<Value, Str
                 "duration_secs": t.started_at.and_then(|s| t.completed_at.map(|c| (c - s).num_seconds())),
             })
         }).collect();
-    Ok(json!({"pending_count": pending.len(), "candidates": pending, "instructions": "For each: 3Q check (Reusable? Specific? New?). Yes=extract_workflow. No=dismiss_extraction."}))
+    Ok(
+        json!({"pending_count": pending.len(), "candidates": pending, "instructions": "For each: 3Q check (Reusable? Specific? New?). Yes=extract_workflow. No=dismiss_extraction."}),
+    )
 }
 
 fn handle_extract_workflow(server: &Server, args: Value) -> Result<Value, String> {
-    let task_id = args.get("task_id").and_then(|v| v.as_str()).ok_or("Missing 'task_id'")?;
-    let name = args.get("name").and_then(|v| v.as_str()).ok_or("Missing 'name'")?;
-    let description = args.get("description").and_then(|v| v.as_str()).ok_or("Missing 'description'")?;
-    let pattern_type = args.get("pattern_type").and_then(|v| v.as_str()).unwrap_or("workflow");
+    let task_id = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'task_id'")?;
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'name'")?;
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'description'")?;
+    let pattern_type = args
+        .get("pattern_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("workflow");
     let mut store = server.runtime.block_on(server.tasks.write());
-    let task = store.get_mut(task_id).ok_or(format!("Task '{}' not found", task_id))?;
-    let steps_summary: Vec<String> = task.steps.iter().map(|s| {
-        let summary = s.summary.as_deref().unwrap_or("");
-        format!("{}: {}", s.tool, safe_truncate(summary, 100))
-    }).collect();
+    let task = store
+        .get_mut(task_id)
+        .ok_or(format!("Task '{}' not found", task_id))?;
+    let steps_summary: Vec<String> = task
+        .steps
+        .iter()
+        .map(|s| {
+            let summary = s.summary.as_deref().unwrap_or("");
+            format!("{}: {}", s.tool, safe_truncate(summary, 100))
+        })
+        .collect();
     let pattern = json!({"name": name, "description": description, "pattern_type": pattern_type, "steps": steps_summary, "backend": task.backend, "source_task_id": task.id, "original_prompt": task.prompt, "error": task.error, "extracted_at": Utc::now().to_rfc3339(), "times_used": 0, "success_rate": if task.status == TaskStatus::Done { 1.0_f64 } else { 0.0_f64 }});
     let _ = std::fs::create_dir_all(workflow_patterns_dir());
     let pattern_path = format!("{}\\{}.json", workflow_patterns_dir(), name);
@@ -4792,21 +6027,34 @@ fn handle_extract_workflow(server: &Server, args: Value) -> Result<Value, String
     std::fs::write(&pattern_path, &data).map_err(|e| format!("Failed to write: {}", e))?;
     task.extraction_status = ExtractionStatus::Extracted;
     Server::persist_task(task);
-    Ok(json!({"status": "extracted", "pattern_name": name, "pattern_path": pattern_path, "pattern_type": pattern_type}))
+    Ok(
+        json!({"status": "extracted", "pattern_name": name, "pattern_path": pattern_path, "pattern_type": pattern_type}),
+    )
 }
 
 fn handle_dismiss_extraction(server: &Server, args: Value) -> Result<Value, String> {
-    let task_id = args.get("task_id").and_then(|v| v.as_str()).ok_or("Missing 'task_id'")?;
-    let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("not extractable");
+    let task_id = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'task_id'")?;
+    let reason = args
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("not extractable");
     let mut store = server.runtime.block_on(server.tasks.write());
-    let task = store.get_mut(task_id).ok_or(format!("Task '{}' not found", task_id))?;
+    let task = store
+        .get_mut(task_id)
+        .ok_or(format!("Task '{}' not found", task_id))?;
     task.extraction_status = ExtractionStatus::Dismissed;
     Server::persist_task(task);
     Ok(json!({"status": "dismissed", "task_id": task_id, "reason": reason}))
 }
 
 fn handle_rollback_task(server: &Server, args: Value) -> Result<Value, String> {
-    let task_id = args.get("task_id").and_then(|v| v.as_str()).ok_or("Missing task_id")?;
+    let task_id = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing task_id")?;
     let store = server.runtime.block_on(server.tasks.read());
     let task = store.get(task_id).ok_or("Task not found")?;
     let restored = Server::rollback(task)?;
@@ -4815,14 +6063,22 @@ fn handle_rollback_task(server: &Server, args: Value) -> Result<Value, String> {
 
 /// Item 18: Manually trigger a retry for a failed task.
 fn handle_retry_task(server: &Server, args: Value) -> Result<Value, String> {
-    let task_id = args.get("task_id").and_then(|v| v.as_str()).ok_or("Missing 'task_id'")?;
+    let task_id = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'task_id'")?;
     let inject_context = args.get("inject_context").and_then(|v| v.as_str());
 
     let mut store = server.runtime.block_on(server.tasks.write());
-    let task = store.get_mut(task_id).ok_or(format!("Task '{}' not found", task_id))?;
+    let task = store
+        .get_mut(task_id)
+        .ok_or(format!("Task '{}' not found", task_id))?;
 
     if task.status != TaskStatus::Failed {
-        return Err(format!("Task '{}' is {} - can only retry failed tasks", task_id, task.status));
+        return Err(format!(
+            "Task '{}' is {} - can only retry failed tasks",
+            task_id, task.status
+        ));
     }
 
     // Override max_retries to allow manual retry even if limit reached
@@ -4834,8 +6090,7 @@ fn handle_retry_task(server: &Server, args: Value) -> Result<Value, String> {
         task.error = Some(format!("{}\n\nAdditional context: {}", current_error, ctx));
     }
 
-    let retry = Server::prepare_retry(task)
-        .ok_or("Failed to prepare retry")?;
+    let retry = Server::prepare_retry(task).ok_or("Failed to prepare retry")?;
 
     let retry_id = retry.id.clone();
     let retry_backend = retry.backend.to_string();
@@ -4845,7 +6100,12 @@ fn handle_retry_task(server: &Server, args: Value) -> Result<Value, String> {
     Server::persist_task(&retry);
     drop(store);
 
-    spawn_retry_execution(&retry, server.tasks.clone(), Some(server.config.clone()), &server.runtime);
+    spawn_retry_execution(
+        &retry,
+        server.tasks.clone(),
+        Some(server.config.clone()),
+        &server.runtime,
+    );
 
     Ok(json!({
         "retry_task_id": retry_id,
@@ -4861,18 +6121,26 @@ fn handle_retry_task(server: &Server, args: Value) -> Result<Value, String> {
 // ============================================================================
 
 fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
-    let task_id = args.get("task_id").and_then(|v| v.as_str())
+    let task_id = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
         .ok_or("Missing required 'task_id'")?;
     let additional_context = args.get("additional_context").and_then(|v| v.as_str());
     let backend_override = args.get("backend_override").and_then(|v| v.as_str());
-    let include_files: Vec<String> = args.get("include_files")
+    let include_files: Vec<String> = args
+        .get("include_files")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     // Look up original task
     let store = server.runtime.block_on(server.tasks.read());
-    let original = store.get(task_id)
+    let original = store
+        .get(task_id)
         .ok_or(format!("Task '{}' not found", task_id))?;
 
     if original.status != TaskStatus::Done {
@@ -4890,7 +6158,12 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
             "gemini" => Backend::Gemini,
             "claude_code" | "claude" => Backend::ClaudeCode,
             "codex" => Backend::Codex,
-            _ => return Err(format!("Unknown backend_override '{}'. Use: gpt, gemini, claude_code, codex", ovr)),
+            _ => {
+                return Err(format!(
+                    "Unknown backend_override '{}'. Use: gpt, gemini, claude_code, codex",
+                    ovr
+                ))
+            }
         }
     } else {
         original.backend.clone()
@@ -4947,13 +6220,25 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
         created_at: Utc::now(),
         started_at: None,
         completed_at: None,
-        progress_lines: 0, steps: Vec::new(), last_activity: None, last_output_chunk_at: None, stall_detected: false,
+        progress_lines: 0,
+        steps: Vec::new(),
+        last_activity: None,
+        last_output_chunk_at: None,
+        stall_detected: false,
         extraction_status: ExtractionStatus::None,
-        trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None,
-        validation_status: ValidationStatus::NotChecked, assertions: Vec::new(),
-        backed_up_files: Vec::new(), retry_count: 0, max_retries: 2,
-        retry_of: None, error_context: None,
-        input_tokens: 0, output_tokens: 0, cost_usd: 0.0,
+        trust_score: 0,
+        trust_level: TrustLevel::Low,
+        rollback_path: None,
+        validation_status: ValidationStatus::NotChecked,
+        assertions: Vec::new(),
+        backed_up_files: Vec::new(),
+        retry_count: 0,
+        max_retries: 2,
+        retry_of: None,
+        error_context: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0.0,
         on_complete: original_on_complete,
         role: original_role,
         save_artifact: true,
@@ -4999,11 +6284,16 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
                 prompt_for_spawn,
                 "--dangerously-skip-permissions".to_string(),
                 "--verbose".to_string(),
-                "--output-format".to_string(), "stream-json".to_string(),
-                "--add-dir".to_string(), r"C:\temp".to_string(),
-                "--add-dir".to_string(), r"C:\My Drive\Volumes".to_string(),
-                "--add-dir".to_string(), r"C:\CPC".to_string(),
-                "--add-dir".to_string(), r"C:\rust-mcp".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--add-dir".to_string(),
+                r"C:\temp".to_string(),
+                "--add-dir".to_string(),
+                r"C:\My Drive\Volumes".to_string(),
+                "--add-dir".to_string(),
+                r"C:\CPC".to_string(),
+                "--add-dir".to_string(),
+                r"C:\rust-mcp".to_string(),
             ];
             if let Some(m) = model_for_spawn {
                 args.push("--model".to_string());
@@ -5013,7 +6303,14 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
                 args.push("--add-dir".to_string());
                 args.push(wd.clone());
             }
-            server.runtime.spawn(run_cli_task(tasks_bg, tid, claude_code_cmd(), args, rerun_pipes.clone(), StdinMode::Null));
+            server.runtime.spawn(run_cli_task(
+                tasks_bg,
+                tid,
+                claude_code_cmd(),
+                args,
+                rerun_pipes.clone(),
+                StdinMode::Null,
+            ));
         }
         Backend::Gemini => {
             let mut args = vec![
@@ -5026,15 +6323,29 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
                 args.push("--model".to_string());
                 args.push(m);
             }
-            server.runtime.spawn(run_cli_task(tasks_bg, tid, r"C:\Program Files\nodejs\node.exe", args, rerun_pipes.clone(), StdinMode::Null));
+            server.runtime.spawn(run_cli_task(
+                tasks_bg,
+                tid,
+                r"C:\Program Files\nodejs\node.exe",
+                args,
+                rerun_pipes.clone(),
+                StdinMode::Null,
+            ));
         }
         Backend::Codex => {
             let wd = original_working_dir.unwrap_or_else(|| r"C:\rust-mcp".to_string());
             let args = vec![
-                "exec".into(), "--json".into(), "--skip-git-repo-check".into(),
-                "--full-auto".into(), "--cd".into(), wd.clone(), prompt_for_spawn,
+                "exec".into(),
+                "--json".into(),
+                "--skip-git-repo-check".into(),
+                "--full-auto".into(),
+                "--cd".into(),
+                wd.clone(),
+                prompt_for_spawn,
             ];
-            server.runtime.spawn(run_codex_task(tasks_bg, tid, args, wd));
+            server
+                .runtime
+                .spawn(run_codex_task(tasks_bg, tid, args, wd));
         }
     }
 
@@ -5055,7 +6366,10 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
 // ============================================================================
 
 fn handle_route_task(args: Value) -> Result<Value, String> {
-    let prompt = args.get("prompt").and_then(|v| v.as_str()).ok_or("Missing 'prompt'")?;
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'prompt'")?;
     let working_dir = args.get("working_dir").and_then(|v| v.as_str());
     let rec = Server::recommend_backend(prompt, working_dir);
     Ok(json!({
@@ -5074,10 +6388,24 @@ fn handle_route_task(args: Value) -> Result<Value, String> {
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 fn handle_notify(args: Value) -> Value {
-    let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-    let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let title = args
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let body = args
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let icon = args.get("icon").and_then(|v| v.as_str()).unwrap_or("info");
-    let duration_ms = args.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(5000).max(1);
+    let duration_ms = args
+        .get("duration_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5000)
+        .max(1);
 
     if title.is_empty() || body.is_empty() {
         return json!({"error": "Both title and body are required"});
@@ -5954,38 +7282,68 @@ struct DashboardState {
 
 async fn dash_status(State(st): State<DashboardState>) -> Json<Value> {
     let store = st.tasks.read().await;
-    let running = store.values().filter(|t| t.status == TaskStatus::Running).count();
-    let completed = store.values().filter(|t| t.status == TaskStatus::Done).count();
+    let running = store
+        .values()
+        .filter(|t| t.status == TaskStatus::Running)
+        .count();
+    let completed = store
+        .values()
+        .filter(|t| t.status == TaskStatus::Done)
+        .count();
     let mut tasks: Vec<&Task> = store.values().collect();
     tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    let tasks_json: Vec<Value> = tasks.iter().map(|t| json!({
-        "id": t.id,
-        "backend": t.backend,
-        "status": t.status.to_string(),
-        "prompt_preview": safe_truncate(&t.prompt, 100),
-        "created_at": t.created_at.to_rfc3339(),
-        "progress_lines": t.progress_lines,
-    })).collect();
-    Json(json!({ "tasks": tasks_json, "running": running, "completed": completed, "total": store.len() }))
+    let tasks_json: Vec<Value> = tasks
+        .iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "backend": t.backend,
+                "status": t.status.to_string(),
+                "prompt_preview": safe_truncate(&t.prompt, 100),
+                "created_at": t.created_at.to_rfc3339(),
+                "progress_lines": t.progress_lines,
+            })
+        })
+        .collect();
+    Json(
+        json!({ "tasks": tasks_json, "running": running, "completed": completed, "total": store.len() }),
+    )
 }
 
-async fn dash_status_by_id(State(st): State<DashboardState>, AxumPath(id): AxumPath<String>) -> (StatusCode, Json<Value>) {
+async fn dash_status_by_id(
+    State(st): State<DashboardState>,
+    AxumPath(id): AxumPath<String>,
+) -> (StatusCode, Json<Value>) {
     let store = st.tasks.read().await;
     match store.get(&id) {
-        Some(t) => (StatusCode::OK, Json(json!({
-            "id": t.id, "backend": t.backend, "status": t.status.to_string(),
-            "prompt": t.prompt, "output": t.output, "error": t.error,
-            "created_at": t.created_at.to_rfc3339(),
-            "started_at": t.started_at.map(|s| s.to_rfc3339()),
-            "completed_at": t.completed_at.map(|s| s.to_rfc3339()),
-            "progress_lines": t.progress_lines,
-        }))),
-        None => (StatusCode::NOT_FOUND, Json(json!({"error": format!("Task '{}' not found", id)}))),
+        Some(t) => (
+            StatusCode::OK,
+            Json(json!({
+                "id": t.id, "backend": t.backend, "status": t.status.to_string(),
+                "prompt": t.prompt, "output": t.output, "error": t.error,
+                "created_at": t.created_at.to_rfc3339(),
+                "started_at": t.started_at.map(|s| s.to_rfc3339()),
+                "completed_at": t.completed_at.map(|s| s.to_rfc3339()),
+                "progress_lines": t.progress_lines,
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("Task '{}' not found", id)})),
+        ),
     }
 }
 
 async fn dash_health() -> Json<Value> {
-    let servers = ["utonomous", "echo", "atlas", "local", "browser-mcp", "manager", "stocks"];
+    let servers = [
+        "utonomous",
+        "echo",
+        "atlas",
+        "local",
+        "browser-mcp",
+        "manager",
+        "stocks",
+    ];
     let output = TokioCommand::new("tasklist")
         .args(["/FO", "CSV", "/NH"])
         .output()
@@ -5995,7 +7353,10 @@ async fn dash_health() -> Json<Value> {
     let mut result = serde_json::Map::new();
     for name in &servers {
         let alive = output.contains(&format!("{}.exe", name));
-        result.insert(name.to_string(), json!(if alive { "alive" } else { "dead" }));
+        result.insert(
+            name.to_string(),
+            json!(if alive { "alive" } else { "dead" }),
+        );
     }
     Json(json!({"servers": Value::Object(result)}))
 }
@@ -6011,28 +7372,56 @@ async fn dash_inbox() -> Json<Value> {
     let mut section = "";
     let mut entry = String::new();
     for line in content.lines() {
-        if line.starts_with("## Pending") { flush_entry(&mut entry, section, &mut pending, &mut processed); section = "pending"; continue; }
-        if line.starts_with("## Processed") { flush_entry(&mut entry, section, &mut pending, &mut processed); section = "processed"; continue; }
-        if line.starts_with("## ") { flush_entry(&mut entry, section, &mut pending, &mut processed); section = ""; continue; }
-        if line.starts_with("### ") { flush_entry(&mut entry, section, &mut pending, &mut processed); entry = line.to_string(); }
-        else if !entry.is_empty() { entry.push('\n'); entry.push_str(line); }
+        if line.starts_with("## Pending") {
+            flush_entry(&mut entry, section, &mut pending, &mut processed);
+            section = "pending";
+            continue;
+        }
+        if line.starts_with("## Processed") {
+            flush_entry(&mut entry, section, &mut pending, &mut processed);
+            section = "processed";
+            continue;
+        }
+        if line.starts_with("## ") {
+            flush_entry(&mut entry, section, &mut pending, &mut processed);
+            section = "";
+            continue;
+        }
+        if line.starts_with("### ") {
+            flush_entry(&mut entry, section, &mut pending, &mut processed);
+            entry = line.to_string();
+        } else if !entry.is_empty() {
+            entry.push('\n');
+            entry.push_str(line);
+        }
     }
     flush_entry(&mut entry, section, &mut pending, &mut processed);
     Json(json!({"pending": pending, "processed": processed}))
 }
 
-fn flush_entry(entry: &mut String, section: &str, pending: &mut Vec<String>, processed: &mut Vec<String>) {
-    if entry.is_empty() { return; }
+fn flush_entry(
+    entry: &mut String,
+    section: &str,
+    pending: &mut Vec<String>,
+    processed: &mut Vec<String>,
+) {
+    if entry.is_empty() {
+        return;
+    }
     match section {
         "pending" => pending.push(std::mem::take(entry)),
         "processed" => processed.push(std::mem::take(entry)),
-        _ => { entry.clear(); }
+        _ => {
+            entry.clear();
+        }
     }
 }
 
 async fn dash_get_prefs() -> Json<Value> {
-    let prefs_path = format!(r"{}\CPC\config\dashboard_prefs.json",
-        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\Users\josep\AppData\Local".into()));
+    let prefs_path = format!(
+        r"{}\CPC\config\dashboard_prefs.json",
+        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\Users\josep\AppData\Local".into())
+    );
     match std::fs::read_to_string(&prefs_path) {
         Ok(c) => Json(serde_json::from_str::<Value>(&c).unwrap_or(json!({}))),
         Err(_) => Json(json!({})),
@@ -6040,40 +7429,92 @@ async fn dash_get_prefs() -> Json<Value> {
 }
 
 async fn dash_post_prefs(Json(body): Json<Value>) -> Json<Value> {
-    let prefs_dir = format!(r"{}\CPC\config",
-        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\Users\josep\AppData\Local".into()));
+    let prefs_dir = format!(
+        r"{}\CPC\config",
+        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\Users\josep\AppData\Local".into())
+    );
     let _ = std::fs::create_dir_all(&prefs_dir);
     let prefs_path = format!(r"{}\dashboard_prefs.json", prefs_dir);
-    match std::fs::write(&prefs_path, serde_json::to_string_pretty(&body).unwrap_or_default()) {
+    match std::fs::write(
+        &prefs_path,
+        serde_json::to_string_pretty(&body).unwrap_or_default(),
+    ) {
         Ok(_) => Json(json!({"saved": true})),
         Err(e) => Json(json!({"error": format!("Failed to write prefs: {}", e)})),
     }
 }
 
-async fn dash_post_task(State(st): State<DashboardState>, Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+async fn dash_post_task(
+    State(st): State<DashboardState>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
     let backend_str = match body.get("backend").and_then(|v| v.as_str()) {
         Some(b) => b,
-        None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Missing 'backend'"}))),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Missing 'backend'"})),
+            )
+        }
     };
     let prompt = match body.get("prompt").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
-        None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Missing 'prompt'"}))),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Missing 'prompt'"})),
+            )
+        }
     };
-    let working_dir = body.get("working_dir").and_then(|v| v.as_str()).map(String::from);
+    let working_dir = body
+        .get("working_dir")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let backend = match backend_str {
         "gpt" => Backend::Gpt,
         "gemini" => Backend::Gemini,
         "claude_code" | "claude" => Backend::ClaudeCode,
         "codex" => Backend::Codex,
-        _ => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Unknown backend: {}", backend_str)}))),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("Unknown backend: {}", backend_str)})),
+            )
+        }
     };
     let task_id = Uuid::new_v4().to_string()[..8].to_string();
     let task = Task {
-        id: task_id.clone(), backend: backend.clone(), prompt: prompt.clone(),
-        system_prompt: None, model: None, working_dir: working_dir.clone(),
-        status: TaskStatus::Queued, output: String::new(), error: None,
-        created_at: Utc::now(), started_at: None, completed_at: None, progress_lines: 0, steps: Vec::new(), last_activity: None, last_output_chunk_at: None, stall_detected: false, extraction_status: ExtractionStatus::None,
-        trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None, validation_status: ValidationStatus::NotChecked, assertions: Vec::new(), backed_up_files: Vec::new(), retry_count: 0, max_retries: 2, retry_of: None, error_context: None, input_tokens: 0, output_tokens: 0, cost_usd: 0.0,
+        id: task_id.clone(),
+        backend: backend.clone(),
+        prompt: prompt.clone(),
+        system_prompt: None,
+        model: None,
+        working_dir: working_dir.clone(),
+        status: TaskStatus::Queued,
+        output: String::new(),
+        error: None,
+        created_at: Utc::now(),
+        started_at: None,
+        completed_at: None,
+        progress_lines: 0,
+        steps: Vec::new(),
+        last_activity: None,
+        last_output_chunk_at: None,
+        stall_detected: false,
+        extraction_status: ExtractionStatus::None,
+        trust_score: 0,
+        trust_level: TrustLevel::Low,
+        rollback_path: None,
+        validation_status: ValidationStatus::NotChecked,
+        assertions: Vec::new(),
+        backed_up_files: Vec::new(),
+        retry_count: 0,
+        max_retries: 2,
+        retry_of: None,
+        error_context: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0.0,
         on_complete: None,
         role: None,
         save_artifact: false,
@@ -6092,42 +7533,87 @@ async fn dash_post_task(State(st): State<DashboardState>, Json(body): Json<Value
         live_activity: None,
         effort: None,
     };
-    { let mut store = st.tasks.write().await; store.insert(task_id.clone(), task.clone()); }
+    {
+        let mut store = st.tasks.write().await;
+        store.insert(task_id.clone(), task.clone());
+    }
     Server::persist_task(&task);
     let tasks_bg = st.tasks.clone();
     let tid = task_id.clone();
     match backend {
-        Backend::Gpt => { tokio::spawn(run_gpt_task(st.config.clone(), tasks_bg, tid)); }
+        Backend::Gpt => {
+            tokio::spawn(run_gpt_task(st.config.clone(), tasks_bg, tid));
+        }
         Backend::Gemini => {
-            let args = vec![gemini_cmd().to_string(), "-p".into(), prompt, "--yolo".into()];
-            tokio::spawn(run_cli_task(tasks_bg, tid, node_cmd(), args, None, StdinMode::Null));
+            let args = vec![
+                gemini_cmd().to_string(),
+                "-p".into(),
+                prompt,
+                "--yolo".into(),
+            ];
+            tokio::spawn(run_cli_task(
+                tasks_bg,
+                tid,
+                node_cmd(),
+                args,
+                None,
+                StdinMode::Null,
+            ));
         }
         Backend::ClaudeCode => {
             let mut args = vec![
-                "-p".into(), prompt,
-                "--dangerously-skip-permissions".into(), "--verbose".into(),
-                "--output-format".into(), "stream-json".into(),
-                "--add-dir".into(), r"C:\temp".into(),
-                "--add-dir".into(), r"C:\My Drive\Volumes".into(),
-                "--add-dir".into(), r"C:\CPC".into(),
-                "--add-dir".into(), r"C:\rust-mcp".into(),
+                "-p".into(),
+                prompt,
+                "--dangerously-skip-permissions".into(),
+                "--verbose".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+                "--add-dir".into(),
+                r"C:\temp".into(),
+                "--add-dir".into(),
+                r"C:\My Drive\Volumes".into(),
+                "--add-dir".into(),
+                r"C:\CPC".into(),
+                "--add-dir".into(),
+                r"C:\rust-mcp".into(),
             ];
-            if let Some(ref wd) = working_dir { args.push("--add-dir".into()); args.push(wd.clone()); }
-            tokio::spawn(run_cli_task(tasks_bg, tid, claude_code_cmd(), args, None, StdinMode::Null));
+            if let Some(ref wd) = working_dir {
+                args.push("--add-dir".into());
+                args.push(wd.clone());
+            }
+            tokio::spawn(run_cli_task(
+                tasks_bg,
+                tid,
+                claude_code_cmd(),
+                args,
+                None,
+                StdinMode::Null,
+            ));
         }
         Backend::Codex => {
             let wd = working_dir.unwrap_or_else(|| r"C:\rust-mcp".to_string());
             let args = vec![
-                "exec".into(), "--json".into(), "--skip-git-repo-check".into(),
-                "--full-auto".into(), "--cd".into(), wd.clone(), prompt,
+                "exec".into(),
+                "--json".into(),
+                "--skip-git-repo-check".into(),
+                "--full-auto".into(),
+                "--cd".into(),
+                wd.clone(),
+                prompt,
             ];
             tokio::spawn(run_codex_task(tasks_bg, tid, args, wd));
         }
     }
-    (StatusCode::OK, Json(json!({"task_id": task_id, "status": "queued"})))
+    (
+        StatusCode::OK,
+        Json(json!({"task_id": task_id, "status": "queued"})),
+    )
 }
 
-async fn dash_cancel(State(st): State<DashboardState>, AxumPath(id): AxumPath<String>) -> (StatusCode, Json<Value>) {
+async fn dash_cancel(
+    State(st): State<DashboardState>,
+    AxumPath(id): AxumPath<String>,
+) -> (StatusCode, Json<Value>) {
     let mut store = st.tasks.write().await;
     match store.get_mut(&id) {
         Some(task) if task.status == TaskStatus::Running || task.status == TaskStatus::Queued => {
@@ -6138,10 +7624,19 @@ async fn dash_cancel(State(st): State<DashboardState>, AxumPath(id): AxumPath<St
             // Item 18: no retry for cancelled tasks
             Server::persist_task(task);
             Server::save_to_history(task);
-            (StatusCode::OK, Json(json!({"task_id": id, "status": "cancelled"})))
+            (
+                StatusCode::OK,
+                Json(json!({"task_id": id, "status": "cancelled"})),
+            )
         }
-        Some(task) => (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Task {} is {} - cannot cancel", id, task.status)}))),
-        None => (StatusCode::NOT_FOUND, Json(json!({"error": format!("Task {} not found", id)}))),
+        Some(task) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Task {} is {} - cannot cancel", id, task.status)})),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("Task {} not found", id)})),
+        ),
     }
 }
 
@@ -6152,8 +7647,14 @@ async fn dash_knowledge() -> Json<Value> {
     if let Ok(entries) = std::fs::read_dir(volumes_path) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() { continue; }
-            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             let op_file = path.join(format!("Operating_{}.md", name));
             let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
             topics.push(json!({
@@ -6161,24 +7662,38 @@ async fn dash_knowledge() -> Json<Value> {
                 "has_operating_file": op_file.exists(),
                 "modified": modified.map(|t| { let dt: DateTime<Utc> = t.into(); dt.to_rfc3339() }),
             }));
-            if let Some(t) = modified { recent.push((name, t)); }
+            if let Some(t) = modified {
+                recent.push((name, t));
+            }
         }
     }
     recent.sort_by(|a, b| b.1.cmp(&a.1));
     recent.truncate(10);
-    let recent_json: Vec<Value> = recent.iter().map(|(n, t)| {
-        let dt: DateTime<Utc> = (*t).into();
-        json!({"topic": n, "modified": dt.to_rfc3339()})
-    }).collect();
+    let recent_json: Vec<Value> = recent
+        .iter()
+        .map(|(n, t)| {
+            let dt: DateTime<Utc> = (*t).into();
+            json!({"topic": n, "modified": dt.to_rfc3339()})
+        })
+        .collect();
     Json(json!({"topics": topics, "recent_changes": recent_json}))
 }
 
 async fn dash_git() -> Json<Value> {
     let repo = r"C:\rust-mcp";
     let (status, branch, log) = tokio::join!(
-        TokioCommand::new("git").args(["status", "--porcelain"]).current_dir(repo).output(),
-        TokioCommand::new("git").args(["branch", "--show-current"]).current_dir(repo).output(),
-        TokioCommand::new("git").args(["log", "--oneline", "-5"]).current_dir(repo).output()
+        TokioCommand::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(repo)
+            .output(),
+        TokioCommand::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(repo)
+            .output(),
+        TokioCommand::new("git")
+            .args(["log", "--oneline", "-5"])
+            .current_dir(repo)
+            .output()
     );
     Json(json!({
         "branch": branch.ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()),
@@ -6235,14 +7750,23 @@ fn validate_volumes_path(requested: &str) -> Result<std::path::PathBuf, (StatusC
     let candidate = base.join(requested);
     // Canonicalize base (must exist)
     let canon_base = base.canonicalize().map_err(|_| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Volumes base path not accessible"})))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Volumes base path not accessible"})),
+        )
     })?;
     // Canonicalize candidate
     let canon = candidate.canonicalize().map_err(|_| {
-        (StatusCode::NOT_FOUND, Json(json!({"error": "File not found"})))
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "File not found"})),
+        )
     })?;
     if !canon.starts_with(&canon_base) {
-        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "Access denied: path outside Volumes"}))));
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Access denied: path outside Volumes"})),
+        ));
     }
     Ok(canon)
 }
@@ -6255,36 +7779,64 @@ struct PathQuery {
 async fn api_read_file(Query(q): Query<PathQuery>) -> impl IntoResponse {
     let rel_path = match q.path {
         Some(p) if !p.is_empty() => p,
-        _ => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Missing 'path' parameter"}))).into_response(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Missing 'path' parameter"})),
+            )
+                .into_response()
+        }
     };
     let canon = match validate_volumes_path(&rel_path) {
         Ok(p) => p,
         Err((status, body)) => return (status, body).into_response(),
     };
     if !canon.is_file() {
-        return (StatusCode::NOT_FOUND, Json(json!({"error": "File not found"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "File not found"})),
+        )
+            .into_response();
     }
     match tokio::fs::read_to_string(&canon).await {
         Ok(contents) => (
             StatusCode::OK,
-            [("content-type", "text/plain; charset=utf-8"), ("access-control-allow-origin", "*")],
+            [
+                ("content-type", "text/plain; charset=utf-8"),
+                ("access-control-allow-origin", "*"),
+            ],
             contents,
-        ).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Failed to read file"}))).into_response(),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Failed to read file"})),
+        )
+            .into_response(),
     }
 }
 
 async fn api_list_dir(Query(q): Query<PathQuery>) -> impl IntoResponse {
     let rel_path = match q.path {
         Some(p) if !p.is_empty() => p,
-        _ => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Missing 'path' parameter"}))).into_response(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Missing 'path' parameter"})),
+            )
+                .into_response()
+        }
     };
     let canon = match validate_volumes_path(&rel_path) {
         Ok(p) => p,
         Err((status, body)) => return (status, body).into_response(),
     };
     if !canon.is_dir() {
-        return (StatusCode::NOT_FOUND, Json(json!({"error": "Directory not found"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Directory not found"})),
+        )
+            .into_response();
     }
     let mut files: Vec<Value> = Vec::new();
     match std::fs::read_dir(&canon) {
@@ -6298,29 +7850,37 @@ async fn api_list_dir(Query(q): Query<PathQuery>) -> impl IntoResponse {
                 }));
             }
         }
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Failed to read directory"}))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Failed to read directory"})),
+            )
+                .into_response()
+        }
     }
     (
         StatusCode::OK,
         [("access-control-allow-origin", "*")],
         Json(json!({"files": files})),
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// GET / — serve embedded dashboard HTML
 async fn dash_root() -> impl IntoResponse {
     // Embedded fallback — compiled into the binary as a safety net.
     const EMBEDDED_HTML: &str = include_str!("dashboard_ui.html");
-    
+
     // Try to load a live override from disk first so HTML/CSS/JS tweaks
     // don't require a full Rust rebuild. Looks in %LOCALAPPDATA%\CPC\dashboard\dashboard.html
     // falling back to C:\CPC\dashboard\dashboard.html.
     let override_paths = [
-        std::env::var("LOCALAPPDATA").ok()
+        std::env::var("LOCALAPPDATA")
+            .ok()
             .map(|p| format!(r"{}\CPC\dashboard\dashboard.html", p)),
         Some(r"C:\CPC\dashboard\dashboard.html".to_string()),
     ];
-    
+
     let html_owned: String;
     let html_ref: &str = {
         let mut found = None;
@@ -6333,16 +7893,22 @@ async fn dash_root() -> impl IntoResponse {
             }
         }
         match found {
-            Some(s) => { html_owned = s; &html_owned }
+            Some(s) => {
+                html_owned = s;
+                &html_owned
+            }
             None => EMBEDDED_HTML,
         }
     };
-    
+
     // Cache-Control: no-store so browsers never cache the dashboard HTML.
     // Ends the Ctrl+Shift+R dance for every dashboard iteration.
     (
         [
-            (axum::http::header::CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "no-store, no-cache, must-revalidate",
+            ),
             (axum::http::header::PRAGMA, "no-cache"),
             (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
         ],
@@ -6353,40 +7919,68 @@ async fn dash_root() -> impl IntoResponse {
 /// GET /api/status — rich manager status for the dashboard frontend and live_status.json
 async fn dash_api_status(State(st): State<DashboardState>) -> Json<Value> {
     let store = st.tasks.read().await;
-    let running  = store.values().filter(|t| t.status == TaskStatus::Running).count();
-    let queued   = store.values().filter(|t| t.status == TaskStatus::Queued).count();
-    let done     = store.values().filter(|t| t.status == TaskStatus::Done).count();
-    let failed   = store.values().filter(|t| t.status == TaskStatus::Failed).count();
-    let orphaned = store.values().filter(|t| t.status == TaskStatus::Orphaned).count();
+    let running = store
+        .values()
+        .filter(|t| t.status == TaskStatus::Running)
+        .count();
+    let queued = store
+        .values()
+        .filter(|t| t.status == TaskStatus::Queued)
+        .count();
+    let done = store
+        .values()
+        .filter(|t| t.status == TaskStatus::Done)
+        .count();
+    let failed = store
+        .values()
+        .filter(|t| t.status == TaskStatus::Failed)
+        .count();
+    let orphaned = store
+        .values()
+        .filter(|t| t.status == TaskStatus::Orphaned)
+        .count();
 
     let mut tasks: Vec<&Task> = store.values().collect();
     tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    let tasks_json: Vec<Value> = tasks.iter().take(20).map(|t| json!({
-        "id": t.id,
-        "backend": t.backend.to_string(),
-        "status": t.status.to_string(),
-        "prompt_preview": safe_truncate(&t.prompt, 80),
-        "prompt": t.prompt,
-        "created_at": t.created_at.to_rfc3339(),
-        "started_at": t.started_at.map(|s| s.to_rfc3339()),
-        "completed_at": t.completed_at.map(|s| s.to_rfc3339()),
-        "progress_lines": t.progress_lines,
-        "last_activity": t.last_activity.map(|la| la.to_rfc3339()),
-        "stall_detected": t.stall_detected,
-        "orphaned": t.status == TaskStatus::Orphaned,
-        "label": t.label,
-        "current_step": t.current_step,
-        "total_steps": t.total_steps,
-        "current_step_desc": t.current_step_desc,
-        "live_activity": t.live_activity,
-    })).collect();
+    let tasks_json: Vec<Value> = tasks
+        .iter()
+        .take(20)
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "backend": t.backend.to_string(),
+                "status": t.status.to_string(),
+                "prompt_preview": safe_truncate(&t.prompt, 80),
+                "prompt": t.prompt,
+                "created_at": t.created_at.to_rfc3339(),
+                "started_at": t.started_at.map(|s| s.to_rfc3339()),
+                "completed_at": t.completed_at.map(|s| s.to_rfc3339()),
+                "progress_lines": t.progress_lines,
+                "last_activity": t.last_activity.map(|la| la.to_rfc3339()),
+                "stall_detected": t.stall_detected,
+                "orphaned": t.status == TaskStatus::Orphaned,
+                "label": t.label,
+                "current_step": t.current_step,
+                "total_steps": t.total_steps,
+                "current_step_desc": t.current_step_desc,
+                "live_activity": t.live_activity,
+            })
+        })
+        .collect();
 
     let status_bar = build_status_bar(&store);
     let loaf = find_active_loaf().map(|(id, loaf)| json!({"id": id, "data": loaf}));
 
     let recent_calls: Vec<ToolCallEntry> = {
         let ring = st.recent_tool_calls.lock().unwrap();
-        ring.iter().rev().take(12).cloned().collect::<Vec<_>>().into_iter().rev().collect()
+        ring.iter()
+            .rev()
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     };
 
     Json(json!({
@@ -6431,14 +8025,18 @@ async fn dash_api_config() -> Json<Value> {
 
 /// Resolve Volumes path from env or default.
 fn volumes_path() -> String {
-    std::env::var("CPC_VOLUMES_DIR")
-        .unwrap_or_else(|_| r"C:\My Drive\Volumes".to_string())
+    std::env::var("CPC_VOLUMES_DIR").unwrap_or_else(|_| r"C:\My Drive\Volumes".to_string())
 }
 
 /// Fetch /api/status from a server on localhost. Returns None if unreachable.
 async fn fetch_peer_status(client: &reqwest::Client, port: u16) -> Option<Value> {
     let url = format!("http://127.0.0.1:{}/api/status", port);
-    match client.get(&url).timeout(std::time::Duration::from_secs(3)).send().await {
+    match client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+    {
         Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
         _ => None,
     }
@@ -6447,8 +8045,8 @@ async fn fetch_peer_status(client: &reqwest::Client, port: u16) -> Option<Value>
 /// Background task: 5s poll — walk process tree of running tasks, update live_activity and
 /// step progress fields on TaskMeta. Redacts entries containing password/token/api_key/secret.
 async fn live_activity_walker(tasks: Arc<RwLock<HashMap<String, Task>>>) {
-    use sysinfo::{System, ProcessesToUpdate};
     use regex::Regex;
+    use sysinfo::{ProcessesToUpdate, System};
 
     let step_re = match Regex::new(r"^\[STEP (\d+)/(\d+)\] (.+)$") {
         Ok(r) => r,
@@ -6469,7 +8067,8 @@ async fn live_activity_walker(tasks: Arc<RwLock<HashMap<String, Task>>>) {
         // Snapshot running tasks that have a child_pid — avoid holding read lock during sysinfo work
         let running: Vec<(String, u32, String)> = {
             let store = tasks.read().await;
-            store.values()
+            store
+                .values()
                 .filter(|t| t.status == TaskStatus::Running && t.child_pid.is_some())
                 .map(|t| (t.id.clone(), t.child_pid.unwrap(), t.output.clone()))
                 .collect()
@@ -6481,7 +8080,11 @@ async fn live_activity_walker(tasks: Arc<RwLock<HashMap<String, Task>>>) {
 
             let mut store = tasks.write().await;
             if let Some(task) = store.get_mut(&task_id) {
-                task.live_activity = if activity.is_empty() { None } else { Some(activity) };
+                task.live_activity = if activity.is_empty() {
+                    None
+                } else {
+                    Some(activity)
+                };
                 if let Some((step, total, desc)) = step_info {
                     task.current_step = Some(step);
                     task.total_steps = Some(total);
@@ -6507,11 +8110,16 @@ fn collect_process_tree(
     queue.push_back(root_pid);
 
     while let Some(pid_u32) = queue.pop_front() {
-        if result.len() >= 20 { break; }
-        if !visited.insert(pid_u32) { continue; }
+        if result.len() >= 20 {
+            break;
+        }
+        if !visited.insert(pid_u32) {
+            continue;
+        }
         let pid = Pid::from_u32(pid_u32);
         if let Some(proc) = sys.process(pid) {
-            let cmd_raw: String = proc.cmd()
+            let cmd_raw: String = proc
+                .cmd()
                 .iter()
                 .map(|s| s.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
@@ -6568,7 +8176,8 @@ async fn stall_watchdog(tasks: Arc<RwLock<HashMap<String, Task>>>, timeout_secs:
         // Read pass: collect Running tasks that have exceeded the stall threshold.
         let to_stall: Vec<(String, String)> = {
             let store = tasks.read().await;
-            store.values()
+            store
+                .values()
                 .filter(|t| t.status == TaskStatus::Running)
                 .filter_map(|t| {
                     let baseline = t.last_output_chunk_at.or(t.started_at)?;
@@ -6583,7 +8192,9 @@ async fn stall_watchdog(tasks: Arc<RwLock<HashMap<String, Task>>>, timeout_secs:
                 .collect()
         };
 
-        if to_stall.is_empty() { continue; }
+        if to_stall.is_empty() {
+            continue;
+        }
 
         // Write pass: mark stalled (re-check status inside write lock).
         {
@@ -6623,13 +8234,15 @@ async fn live_status_writer(manager_port: u16) {
     interval.tick().await; // skip immediate first tick — let server settle
     loop {
         interval.tick().await;
-        if !DASHBOARD_RUNNING.load(Ordering::Relaxed) { break; }
+        if !DASHBOARD_RUNNING.load(Ordering::Relaxed) {
+            break;
+        }
 
-        let manager_status  = fetch_peer_status(&client, manager_port).await;
-        let local_status    = fetch_peer_status(&client, 9101).await;
-        let hands_status    = fetch_peer_status(&client, 9102).await;
+        let manager_status = fetch_peer_status(&client, manager_port).await;
+        let local_status = fetch_peer_status(&client, 9101).await;
+        let hands_status = fetch_peer_status(&client, 9102).await;
         let workflow_status = fetch_peer_status(&client, 9103).await;
-        let auto_status     = fetch_peer_status(&client, 9104).await;
+        let auto_status = fetch_peer_status(&client, 9104).await;
 
         let payload = json!({
             "timestamp":  Utc::now().to_rfc3339(),
@@ -6643,7 +8256,10 @@ async fn live_status_writer(manager_port: u16) {
         let dashboard_dir = format!(r"{}\dashboard", vpath);
         if std::fs::create_dir_all(&dashboard_dir).is_ok() {
             let path = format!(r"{}\live_status.json", dashboard_dir);
-            let _ = std::fs::write(&path, serde_json::to_string_pretty(&payload).unwrap_or_default());
+            let _ = std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&payload).unwrap_or_default(),
+            );
         }
     }
 }
@@ -6653,11 +8269,21 @@ async fn api_register_external_task(
     State(st): State<DashboardState>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     if id.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing id"})));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "missing id"})),
+        );
     }
-    let backend_str = body.get("backend").and_then(|v| v.as_str()).unwrap_or("codex");
+    let backend_str = body
+        .get("backend")
+        .and_then(|v| v.as_str())
+        .unwrap_or("codex");
     let backend = match backend_str {
         "codex" => Backend::Codex,
         "gpt" => Backend::Gpt,
@@ -6665,18 +8291,29 @@ async fn api_register_external_task(
         "claude_code" => Backend::ClaudeCode,
         _ => Backend::Codex,
     };
-    let prompt = body.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let status_str = body.get("status").and_then(|v| v.as_str()).unwrap_or("done");
+    let prompt = body
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let status_str = body
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("done");
     let status = match status_str {
         "running" => TaskStatus::Running,
         "failed" => TaskStatus::Failed,
         "queued" => TaskStatus::Queued,
         _ => TaskStatus::Done,
     };
-    let created_at = body.get("created_at").and_then(|v| v.as_str())
+    let created_at = body
+        .get("created_at")
+        .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<DateTime<Utc>>().ok())
         .unwrap_or_else(Utc::now);
-    let completed_at = body.get("completed_at").and_then(|v| v.as_str())
+    let completed_at = body
+        .get("completed_at")
+        .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<DateTime<Utc>>().ok());
 
     let task = Task {
@@ -6692,7 +8329,10 @@ async fn api_register_external_task(
         created_at,
         started_at: Some(created_at),
         completed_at,
-        progress_lines: body.get("output_lines").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+        progress_lines: body
+            .get("output_lines")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize,
         steps: vec![],
         last_activity: completed_at,
         last_output_chunk_at: None,
@@ -6722,7 +8362,10 @@ async fn api_register_external_task(
         watchdog_observations: vec![],
         fingerprint: None,
         superseded_by: None,
-        label: body.get("prompt_preview").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        label: body
+            .get("prompt_preview")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         current_step: None,
         total_steps: None,
         current_step_desc: None,
@@ -6740,13 +8383,20 @@ async fn api_register_external_task(
 async fn start_dashboard(state: DashboardState) {
     // Port priority: CPC_DASHBOARD_PORT → CPC_MANAGER_PORT → default 9100
     let preferred: u16 = std::env::var("CPC_DASHBOARD_PORT")
-        .ok().and_then(|p| p.parse().ok())
-        .or_else(|| std::env::var("CPC_MANAGER_PORT").ok().and_then(|p| p.parse().ok()))
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .or_else(|| {
+            std::env::var("CPC_MANAGER_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+        })
         .unwrap_or(9100);
 
     // Step 12.6: stall watchdog timeout (default 600s = 10 min)
     let stall_timeout_secs: u64 = std::env::var("MANAGER_STALL_TIMEOUT_SECS")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(600);
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600);
 
     // Clone tasks handle before state is moved into axum router
     let tasks_for_watchdog = state.tasks.clone();
@@ -6786,10 +8436,20 @@ async fn start_dashboard(state: DashboardState) {
             Ok(l) => break l,
             Err(e) => {
                 if bound_port < preferred + 5 {
-                    warn!("Dashboard port {} busy: {} — trying {}", bound_port, e, bound_port + 1);
+                    warn!(
+                        "Dashboard port {} busy: {} — trying {}",
+                        bound_port,
+                        e,
+                        bound_port + 1
+                    );
                     bound_port += 1;
                 } else {
-                    warn!("Dashboard failed to bind ports {}–{}: {}", preferred, preferred + 5, e);
+                    warn!(
+                        "Dashboard failed to bind ports {}–{}: {}",
+                        preferred,
+                        preferred + 5,
+                        e
+                    );
                     return;
                 }
             }
@@ -6857,12 +8517,18 @@ fn try_acquire_lock() -> Option<std::fs::File> {
         const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x02;
         const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x01;
         let mut ov = OVERLAPPED {
-            Internal: 0, InternalHigh: 0, Offset: 0, OffsetHigh: 0, hEvent: std::ptr::null_mut(),
+            Internal: 0,
+            InternalHigh: 0,
+            Offset: 0,
+            OffsetHigh: 0,
+            hEvent: std::ptr::null_mut(),
         };
         LockFileEx(
             handle,
             LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-            0, 1, 0,
+            0,
+            1,
+            0,
             &mut ov,
         )
     };
@@ -6887,7 +8553,11 @@ fn run_as_proxy() -> ! {
     let pipe = {
         let mut attempts = 0;
         loop {
-            match std::fs::OpenOptions::new().read(true).write(true).open(PIPE_NAME) {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(PIPE_NAME)
+            {
                 Ok(f) => break f,
                 Err(e) => {
                     attempts += 1;
@@ -6940,7 +8610,11 @@ fn run_as_proxy() -> ! {
 
 /// Start named pipe server — accepts connections from proxy instances.
 /// Each connection gets its own handler thread that processes JSON-RPC requests.
-fn start_pipe_server(server_tasks: Arc<RwLock<HashMap<String, Task>>>, server_config: Arc<RwLock<ServerConfig>>, runtime_handle: tokio::runtime::Handle) {
+fn start_pipe_server(
+    server_tasks: Arc<RwLock<HashMap<String, Task>>>,
+    server_config: Arc<RwLock<ServerConfig>>,
+    runtime_handle: tokio::runtime::Handle,
+) {
     std::thread::spawn(move || {
         use std::os::windows::io::FromRawHandle;
         info!("Named pipe server starting at {}", PIPE_NAME);
@@ -6973,7 +8647,9 @@ fn start_pipe_server(server_tasks: Arc<RwLock<HashMap<String, Task>>>, server_co
                     PIPE_ACCESS_DUPLEX,
                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                     PIPE_UNLIMITED_INSTANCES,
-                    65536, 65536, 0,
+                    65536,
+                    65536,
+                    0,
                     std::ptr::null(),
                 );
                 if handle == -1 {
@@ -6987,7 +8663,8 @@ fn start_pipe_server(server_tasks: Arc<RwLock<HashMap<String, Task>>>, server_co
             };
 
             // Wrap handle as a File for reading/writing
-            let pipe_file = unsafe { std::fs::File::from_raw_handle(pipe_handle as *mut std::ffi::c_void) };
+            let pipe_file =
+                unsafe { std::fs::File::from_raw_handle(pipe_handle as *mut std::ffi::c_void) };
             let tasks_c = server_tasks.clone();
             let config_c = server_config.clone();
             let rt = runtime_handle.clone();
@@ -7021,7 +8698,8 @@ fn start_pipe_server(server_tasks: Arc<RwLock<HashMap<String, Task>>>, server_co
                                 "jsonrpc": "2.0", "id": null,
                                 "error": {"code": -32700, "message": format!("Parse error: {}", e)}
                             });
-                            let _ = writeln!(writer, "{}", serde_json::to_string(&err_resp).unwrap());
+                            let _ =
+                                writeln!(writer, "{}", serde_json::to_string(&err_resp).unwrap());
                             let _ = writer.flush();
                             continue;
                         }
@@ -7043,7 +8721,8 @@ fn start_pipe_server(server_tasks: Arc<RwLock<HashMap<String, Task>>>, server_co
                         }),
                         "tools/call" => {
                             let params = request.params.unwrap_or(json!({}));
-                            let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let tool_name =
+                                params.get("name").and_then(|v| v.as_str()).unwrap_or("");
                             let tool_args = params.get("arguments").cloned().unwrap_or(json!({}));
                             match handle_tool_call(&proxy_server, tool_name, tool_args) {
                                 Ok(result) => json!({
@@ -7092,7 +8771,10 @@ fn main() {
     // run as a proxy that forwards MCP requests via named pipe.
     let _lock_guard = match try_acquire_lock() {
         Some(lock) => {
-            info!("Acquired singleton lock — running as primary instance (PID {})", std::process::id());
+            info!(
+                "Acquired singleton lock — running as primary instance (PID {})",
+                std::process::id()
+            );
             lock
         }
         None => {
@@ -7120,7 +8802,8 @@ fn main() {
                         if pid != my_pid {
                             // Try to connect to pipe — if it responds, this is a live instance (shouldn't happen since we hold the lock)
                             let is_orphan = std::fs::OpenOptions::new()
-                                .read(true).write(true)
+                                .read(true)
+                                .write(true)
                                 .open(PIPE_NAME)
                                 .is_err();
                             if is_orphan {
@@ -7145,7 +8828,11 @@ fn main() {
     let server = Server::new(runtime.handle().clone());
 
     // Start named pipe server for proxy instances
-    start_pipe_server(server.tasks.clone(), server.config.clone(), runtime.handle().clone());
+    start_pipe_server(
+        server.tasks.clone(),
+        server.config.clone(),
+        runtime.handle().clone(),
+    );
 
     // Spawn live activity walker (5s poll: process tree capture + step progress parsing)
     {
@@ -7205,28 +8892,28 @@ fn main() {
         }
 
         let response = match request.method.as_str() {
-            "initialize" => {
-                JsonRpcSuccess {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id,
-                    result: json!({
-                        "protocolVersion": "2024-11-05",
-                        "serverInfo": {"name": "manager", "version": "1.0.0"},
-                        "capabilities": {"tools": {}}
-                    }),
-                }
-            }
+            "initialize" => JsonRpcSuccess {
+                jsonrpc: "2.0".to_string(),
+                id: request.id,
+                result: json!({
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": {"name": "manager", "version": "1.0.0"},
+                    "capabilities": {"tools": {}}
+                }),
+            },
             "notifications/initialized" => continue,
-            "tools/list" => {
-                JsonRpcSuccess {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id,
-                    result: get_tools_list(),
-                }
-            }
+            "tools/list" => JsonRpcSuccess {
+                jsonrpc: "2.0".to_string(),
+                id: request.id,
+                result: get_tools_list(),
+            },
             "tools/call" => {
                 let params = request.params.unwrap_or(json!({}));
-                let tool_name_s = params.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let tool_name_s = params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let tool_args = params.get("arguments").cloned().unwrap_or(json!({}));
 
                 let tc_start = std::time::Instant::now();
@@ -7242,7 +8929,9 @@ fn main() {
                     };
                     let mut ring = server.recent_tool_calls.lock().unwrap();
                     ring.push_back(entry);
-                    if ring.len() > 50 { ring.pop_front(); }
+                    if ring.len() > 50 {
+                        ring.pop_front();
+                    }
                 }
 
                 match result {
@@ -7264,19 +8953,16 @@ fn main() {
                     },
                 }
             }
-            _ => {
-                JsonRpcSuccess {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id,
-                    result: json!({}),
-                }
-            }
+            _ => JsonRpcSuccess {
+                jsonrpc: "2.0".to_string(),
+                id: request.id,
+                result: json!({}),
+            },
         };
 
         server.write_stdout(&serde_json::to_string(&response).unwrap());
     }
 }
-
 
 // ============================================================================
 // Session Management (absorbed from claude-bridge/claude-runner)
@@ -7305,31 +8991,48 @@ pub(crate) fn _resolve_session_dir(legacy: &std::path::Path) -> Result<std::path
     cpc_paths::data_path("manager").map_err(|e| e.to_string())
 }
 
-static _SESSION_DIR: Lazy<String> = Lazy::new(|| {
-    match _resolve_session_dir(std::path::Path::new(LEGACY_SESSION_DIR)) {
-        Ok(p) => p.to_string_lossy().into_owned(),
-        Err(_) => LEGACY_SESSION_DIR.to_string(),
-    }
-});
+static _SESSION_DIR: Lazy<String> =
+    Lazy::new(
+        || match _resolve_session_dir(std::path::Path::new(LEGACY_SESSION_DIR)) {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(_) => LEGACY_SESSION_DIR.to_string(),
+        },
+    );
 
 fn session_dir() -> &'static str {
     &_SESSION_DIR
 }
 
 fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
-    let prompt = args.get("prompt").and_then(|v| v.as_str())
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
         .ok_or("Missing 'prompt'")?;
-    let working_dir = args.get("working_dir").and_then(|v| v.as_str())
+    let working_dir = args
+        .get("working_dir")
+        .and_then(|v| v.as_str())
         .unwrap_or(r"C:\");
     let model = args.get("model").and_then(|v| v.as_str());
-    let allow_duplicate = args.get("allow_duplicate").and_then(|v| v.as_bool()).unwrap_or(false);
+    let allow_duplicate = args
+        .get("allow_duplicate")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     // v1.2.6: session notification flags
     let notify_on_complete = args.get("notify_on_complete").and_then(|v| v.as_bool());
     let notify_on_fail = args.get("notify_on_fail").and_then(|v| v.as_bool());
     let notify_on_destroy = args.get("notify_on_destroy").and_then(|v| v.as_bool());
-    let notify_title = args.get("notify_title").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let notify_body = args.get("notify_body").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let effort = args.get("effort").and_then(|v| v.as_str()).map(String::from);
+    let notify_title = args
+        .get("notify_title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let notify_body = args
+        .get("notify_body")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let effort = args
+        .get("effort")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     // v1.2.3: Fingerprint dedup for sessions (same logic as task_submit)
     let fp = compute_task_fingerprint(&Backend::ClaudeCode, prompt, Some(working_dir));
@@ -7358,7 +9061,9 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
             if let Some(old_task) = wstore.get_mut(&old_id) {
                 old_task.superseded_by = Some("pending".to_string());
                 old_task.watchdog_observations.push(format!(
-                    "[{}] Stalled {}s — superseded by new session", Utc::now().format("%H:%M:%S"), stale_secs
+                    "[{}] Stalled {}s — superseded by new session",
+                    Utc::now().format("%H:%M:%S"),
+                    stale_secs
                 ));
                 Server::persist_task(old_task);
             }
@@ -7376,14 +9081,20 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
 
     // Build args - use -p for first prompt, store session for continuation
     let mut cli_args = vec![
-        "-p".to_string(), prompt.to_string(),
+        "-p".to_string(),
+        prompt.to_string(),
         "--dangerously-skip-permissions".to_string(),
         "--verbose".to_string(),
-        "--output-format".to_string(), "stream-json".to_string(),
-        "--add-dir".to_string(), working_dir.to_string(),
-        "--add-dir".to_string(), r"C:\temp".to_string(),
-        "--add-dir".to_string(), r"C:\My Drive\Volumes".to_string(),
-        "--add-dir".to_string(), r"C:\rust-mcp".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--add-dir".to_string(),
+        working_dir.to_string(),
+        "--add-dir".to_string(),
+        r"C:\temp".to_string(),
+        "--add-dir".to_string(),
+        r"C:\My Drive\Volumes".to_string(),
+        "--add-dir".to_string(),
+        r"C:\rust-mcp".to_string(),
     ];
     if let Some(m) = model {
         cli_args.push("--model".to_string());
@@ -7400,7 +9111,8 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
         let mut store = server.runtime.block_on(server.tasks.write());
         // Link stalled duplicate if any
         if !allow_duplicate {
-            let stalled_id: Option<String> = store.values()
+            let stalled_id: Option<String> = store
+                .values()
                 .find(|t| {
                     t.fingerprint.as_deref() == Some(fp.as_str())
                         && t.id != task_id
@@ -7416,42 +9128,69 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
                 }
             }
         }
-        store.insert(task_id.clone(), Task {
-            id: task_id.clone(),
-            backend: Backend::ClaudeCode,
-            prompt: prompt.to_string(),
-            status: TaskStatus::Running,
-            output: String::new(),
-            error: None,
-            system_prompt: None,
-            model: None,
-            working_dir: Some(working_dir.to_string()),
-            created_at: chrono::Utc::now(),
-            started_at: Some(chrono::Utc::now()),
-            completed_at: None,
-            progress_lines: 0, steps: Vec::new(), last_activity: Some(chrono::Utc::now()), last_output_chunk_at: None, stall_detected: false, extraction_status: ExtractionStatus::None,
-            trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None, validation_status: ValidationStatus::NotChecked, assertions: Vec::new(), backed_up_files: Vec::new(), retry_count: 0, max_retries: 2, retry_of: None, error_context: None, input_tokens: 0, output_tokens: 0, cost_usd: 0.0,
-            on_complete: None,
-            role: None,
-            save_artifact: false,
-            rerun_of: None,
-            parent_task_id: None,
-            forked_from: None,
-            continuation_of: None,
-            child_pid: None,
-            watchdog_observations: Vec::new(),
-            fingerprint: Some(fp.clone()),
-            superseded_by: None,
-            label: args.get("label").and_then(|v| v.as_str()).map(String::from),
-            current_step: None,
-            total_steps: None,
-            current_step_desc: None,
-            live_activity: None,
-            effort: effort.clone(),
-        });
+        store.insert(
+            task_id.clone(),
+            Task {
+                id: task_id.clone(),
+                backend: Backend::ClaudeCode,
+                prompt: prompt.to_string(),
+                status: TaskStatus::Running,
+                output: String::new(),
+                error: None,
+                system_prompt: None,
+                model: None,
+                working_dir: Some(working_dir.to_string()),
+                created_at: chrono::Utc::now(),
+                started_at: Some(chrono::Utc::now()),
+                completed_at: None,
+                progress_lines: 0,
+                steps: Vec::new(),
+                last_activity: Some(chrono::Utc::now()),
+                last_output_chunk_at: None,
+                stall_detected: false,
+                extraction_status: ExtractionStatus::None,
+                trust_score: 0,
+                trust_level: TrustLevel::Low,
+                rollback_path: None,
+                validation_status: ValidationStatus::NotChecked,
+                assertions: Vec::new(),
+                backed_up_files: Vec::new(),
+                retry_count: 0,
+                max_retries: 2,
+                retry_of: None,
+                error_context: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: 0.0,
+                on_complete: None,
+                role: None,
+                save_artifact: false,
+                rerun_of: None,
+                parent_task_id: None,
+                forked_from: None,
+                continuation_of: None,
+                child_pid: None,
+                watchdog_observations: Vec::new(),
+                fingerprint: Some(fp.clone()),
+                superseded_by: None,
+                label: args.get("label").and_then(|v| v.as_str()).map(String::from),
+                current_step: None,
+                total_steps: None,
+                current_step_desc: None,
+                live_activity: None,
+                effort: effort.clone(),
+            },
+        );
     }
 
-    server.runtime.spawn(run_cli_task(tasks_bg.clone(), tid, claude_code_cmd(), cli_args, Some(server.stdin_pipes.clone()), StdinMode::Piped));
+    server.runtime.spawn(run_cli_task(
+        tasks_bg.clone(),
+        tid,
+        claude_code_cmd(),
+        cli_args,
+        Some(server.stdin_pipes.clone()),
+        StdinMode::Piped,
+    ));
 
     // v1.2.3: Spawn session heartbeat — updates alive/pid in meta.json and task store every 30s
     // v1.2.6: pass notifier so heartbeat can fire toast on session completion/failure
@@ -7482,7 +9221,7 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
     });
     let _ = std::fs::write(
         format!("{}\\meta.json", session_path),
-        serde_json::to_string_pretty(&meta).unwrap_or_default()
+        serde_json::to_string_pretty(&meta).unwrap_or_default(),
     );
 
     Ok(json!({
@@ -7498,16 +9237,24 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
 // ============================================================================
 
 #[derive(Debug, Clone, Copy)]
-enum NotifyReason { Completed, Failed, Destroyed }
+enum NotifyReason {
+    Completed,
+    Failed,
+    Destroyed,
+}
 
 fn format_duration(created_at_rfc3339: Option<&str>) -> String {
     created_at_rfc3339
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| {
             let secs = (Utc::now() - dt.with_timezone(&Utc)).num_seconds().max(0);
-            if secs < 60 { format!("{}s", secs) }
-            else if secs < 3600 { format!("{}m {}s", secs / 60, secs % 60) }
-            else { format!("{}h {}m", secs / 3600, (secs % 3600) / 60) }
+            if secs < 60 {
+                format!("{}s", secs)
+            } else if secs < 3600 {
+                format!("{}m {}s", secs / 60, secs % 60)
+            } else {
+                format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+            }
         })
         .unwrap_or_else(|| "unknown duration".to_string())
 }
@@ -7550,22 +9297,47 @@ fn check_and_fire_session_notify(
     notifier: &dyn SessionNotifier,
 ) {
     let exit_was_normal = matches!(task_status, TaskStatus::Done);
-    let notify_complete = meta.get("notify_on_complete").and_then(|v| v.as_bool()).unwrap_or(false);
-    let notify_fail = meta.get("notify_on_fail").and_then(|v| v.as_bool()).unwrap_or(false);
+    let notify_complete = meta
+        .get("notify_on_complete")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let notify_fail = meta
+        .get("notify_on_fail")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let created_at = meta.get("created_at").and_then(|v| v.as_str());
     let title_ov = meta.get("notify_title").and_then(|v| v.as_str());
     let body_ov = meta.get("notify_body").and_then(|v| v.as_str());
 
     if notify_complete && exit_was_normal {
-        fire_notify_for_session(session_id, created_at, title_ov, body_ov, NotifyReason::Completed, notifier);
+        fire_notify_for_session(
+            session_id,
+            created_at,
+            title_ov,
+            body_ov,
+            NotifyReason::Completed,
+            notifier,
+        );
     }
     if notify_fail && !exit_was_normal {
-        fire_notify_for_session(session_id, created_at, title_ov, body_ov, NotifyReason::Failed, notifier);
+        fire_notify_for_session(
+            session_id,
+            created_at,
+            title_ov,
+            body_ov,
+            NotifyReason::Failed,
+            notifier,
+        );
     }
 }
 
 /// v1.2.3: Session heartbeat — polls task store every 30s to sync pid/alive into meta.json.
-async fn session_heartbeat(session_id: String, session_path: String, tasks: Arc<RwLock<HashMap<String, Task>>>, notifier: Arc<dyn SessionNotifier>) {
+async fn session_heartbeat(
+    session_id: String,
+    session_path: String,
+    tasks: Arc<RwLock<HashMap<String, Task>>>,
+    notifier: Arc<dyn SessionNotifier>,
+) {
     let meta_file = format!("{}\\meta.json", session_path);
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -7578,15 +9350,26 @@ async fn session_heartbeat(session_id: String, session_path: String, tasks: Arc<
         drop(store);
 
         // Session is terminal — write final state, fire notify if requested, and stop
-        if matches!(task.status, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled) {
+        if matches!(
+            task.status,
+            TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled
+        ) {
             if let Ok(content) = std::fs::read_to_string(&meta_file) {
                 if let Ok(mut meta) = serde_json::from_str::<Value>(&content) {
                     // v1.2.6: fire toast before writing final state (while meta still has notify flags)
-                    check_and_fire_session_notify(&session_id, &meta, &task.status, notifier.as_ref());
+                    check_and_fire_session_notify(
+                        &session_id,
+                        &meta,
+                        &task.status,
+                        notifier.as_ref(),
+                    );
                     meta["alive"] = json!(false);
                     meta["pid"] = json!(task.child_pid);
                     meta["last_heartbeat"] = json!(Utc::now().to_rfc3339());
-                    let _ = std::fs::write(&meta_file, serde_json::to_string_pretty(&meta).unwrap_or_default());
+                    let _ = std::fs::write(
+                        &meta_file,
+                        serde_json::to_string_pretty(&meta).unwrap_or_default(),
+                    );
                 }
             }
             break;
@@ -7596,17 +9379,22 @@ async fn session_heartbeat(session_id: String, session_path: String, tasks: Arc<
         if let Ok(content) = std::fs::read_to_string(&meta_file) {
             if let Ok(mut meta) = serde_json::from_str::<Value>(&content) {
                 let pid = task.child_pid;
-                let alive = pid.map(|p| {
-                    std::process::Command::new("tasklist")
-                        .args(["/FI", &format!("PID eq {}", p), "/NH"])
-                        .output()
-                        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&p.to_string()))
-                        .unwrap_or(false)
-                }).unwrap_or(false);
+                let alive = pid
+                    .map(|p| {
+                        std::process::Command::new("tasklist")
+                            .args(["/FI", &format!("PID eq {}", p), "/NH"])
+                            .output()
+                            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&p.to_string()))
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
                 meta["pid"] = json!(pid);
                 meta["alive"] = json!(alive);
                 meta["last_heartbeat"] = json!(Utc::now().to_rfc3339());
-                let _ = std::fs::write(&meta_file, serde_json::to_string_pretty(&meta).unwrap_or_default());
+                let _ = std::fs::write(
+                    &meta_file,
+                    serde_json::to_string_pretty(&meta).unwrap_or_default(),
+                );
             }
         }
     }
@@ -7616,14 +9404,20 @@ async fn session_heartbeat(session_id: String, session_path: String, tasks: Arc<
 /// DEPRECATED: session_destroy now routes through handle_cancel_task via dispatch alias.
 #[allow(dead_code)]
 fn handle_session_destroy(server: &Server, args: Value) -> Result<Value, String> {
-    let session_id = args.get("session_id").and_then(|v| v.as_str())
+    let session_id = args
+        .get("session_id")
+        .and_then(|v| v.as_str())
         .ok_or("Missing 'session_id'")?;
 
     // v1.2.6: fire notify_on_destroy before killing, so the toast has time to show
     let meta_file = format!("{}\\{}\\meta.json", session_dir(), session_id);
     if let Ok(content) = std::fs::read_to_string(&meta_file) {
         if let Ok(meta) = serde_json::from_str::<Value>(&content) {
-            if meta.get("notify_on_destroy").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if meta
+                .get("notify_on_destroy")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 fire_notify_for_session(
                     session_id,
                     meta.get("created_at").and_then(|v| v.as_str()),
@@ -7650,7 +9444,9 @@ fn handle_session_destroy(server: &Server, args: Value) -> Result<Value, String>
                 task.error = Some("Session destroyed by user".into());
                 if !killed_tree.is_empty() {
                     task.watchdog_observations.push(format!(
-                        "[{}] session_destroy killed process tree: {:?}", Utc::now().format("%H:%M:%S"), killed_tree
+                        "[{}] session_destroy killed process tree: {:?}",
+                        Utc::now().format("%H:%M:%S"),
+                        killed_tree
                     ));
                 }
                 Server::persist_task(task);
@@ -7665,7 +9461,10 @@ fn handle_session_destroy(server: &Server, args: Value) -> Result<Value, String>
         if let Ok(mut meta) = serde_json::from_str::<Value>(&content) {
             meta["alive"] = json!(false);
             meta["destroyed_at"] = json!(Utc::now().to_rfc3339());
-            let _ = std::fs::write(&meta_file, serde_json::to_string_pretty(&meta).unwrap_or_default());
+            let _ = std::fs::write(
+                &meta_file,
+                serde_json::to_string_pretty(&meta).unwrap_or_default(),
+            );
         }
     }
 
@@ -7683,26 +9482,38 @@ fn handle_session_destroy(server: &Server, args: Value) -> Result<Value, String>
 
 /// Send a follow-up message to a running task's stdin pipe.
 fn handle_send(server: &Server, args: Value) -> Result<Value, String> {
-    let task_id = args.get("task_id")
+    let task_id = args
+        .get("task_id")
         .or_else(|| args.get("session_id"))
         .and_then(|v| v.as_str())
         .ok_or("Missing 'task_id' or 'session_id'")?;
-    let message = args.get("message").and_then(|v| v.as_str())
+    let message = args
+        .get("message")
+        .and_then(|v| v.as_str())
         .ok_or("Missing 'message'")?;
 
     // Check task exists and is running
     {
         let store = server.runtime.block_on(server.tasks.read());
-        let task = store.get(task_id).ok_or(format!("Task '{}' not found", task_id))?;
+        let task = store
+            .get(task_id)
+            .ok_or(format!("Task '{}' not found", task_id))?;
         if !matches!(task.status, TaskStatus::Running) {
-            return Err(format!("Task '{}' is {} — can only send to running tasks", task_id, task.status));
+            return Err(format!(
+                "Task '{}' is {} — can only send to running tasks",
+                task_id, task.status
+            ));
         }
     }
 
     // Write to stdin pipe
     let pipes = server.runtime.block_on(server.stdin_pipes.read());
-    let pipe = pipes.get(task_id)
-        .ok_or(format!("No stdin pipe for task '{}' — process may not support follow-ups", task_id))?
+    let pipe = pipes
+        .get(task_id)
+        .ok_or(format!(
+            "No stdin pipe for task '{}' — process may not support follow-ups",
+            task_id
+        ))?
         .clone();
     drop(pipes);
 
@@ -7710,9 +9521,11 @@ fn handle_send(server: &Server, args: Value) -> Result<Value, String> {
     server.runtime.block_on(async {
         let mut pipe = pipe.lock().await;
         use tokio::io::AsyncWriteExt;
-        pipe.write_all(msg.as_bytes()).await
+        pipe.write_all(msg.as_bytes())
+            .await
             .map_err(|e| format!("Failed to write to stdin: {}", e))?;
-        pipe.flush().await
+        pipe.flush()
+            .await
             .map_err(|e| format!("Failed to flush stdin: {}", e))
     })?;
 
@@ -7726,28 +9539,46 @@ fn handle_send(server: &Server, args: Value) -> Result<Value, String> {
 /// DEPRECATED: session_send now routes through handle_send via dispatch alias.
 #[allow(dead_code)]
 fn handle_send_to_session(server: &Server, args: Value) -> Result<Value, String> {
-    let session_id = args.get("session_id").and_then(|v| v.as_str())
+    let session_id = args
+        .get("session_id")
+        .and_then(|v| v.as_str())
         .ok_or("Missing 'session_id'")?;
-    let message = args.get("message").and_then(|v| v.as_str())
+    let message = args
+        .get("message")
+        .and_then(|v| v.as_str())
         .ok_or("Missing 'message'")?;
-    
+
     // Read session metadata for working_dir and model
     let meta_path = format!("{}\\{}\\meta.json", session_dir(), session_id);
     let meta: Value = std::fs::read_to_string(&meta_path)
         .map(|s| serde_json::from_str(&s).unwrap_or(json!({})))
         .unwrap_or(json!({}));
-    
-    let working_dir = meta.get("working_dir").and_then(|v| v.as_str()).unwrap_or(r"C:\");
+
+    let working_dir = meta
+        .get("working_dir")
+        .and_then(|v| v.as_str())
+        .unwrap_or(r"C:\");
     let model = meta.get("model").and_then(|v| v.as_str());
-    
+
     // Item 6: Route by backend stored in session meta
-    let backend_str = meta.get("backend").and_then(|v| v.as_str()).unwrap_or("claude_code");
+    let backend_str = meta
+        .get("backend")
+        .and_then(|v| v.as_str())
+        .unwrap_or("claude_code");
     let (exe, cli_args, backend_enum): (&str, Vec<String>, Backend) = match backend_str {
         "codex" => {
-            let mut a = vec!["exec".to_string(), "resume".to_string(), "--last".to_string()];
-            if let Some(m) = model { a.push("--model".to_string()); a.push(m.to_string()); }
+            let mut a = vec![
+                "exec".to_string(),
+                "resume".to_string(),
+                "--last".to_string(),
+            ];
+            if let Some(m) = model {
+                a.push("--model".to_string());
+                a.push(m.to_string());
+            }
             a.push("--json".to_string());
-            a.push("--cd".to_string()); a.push(working_dir.to_string());
+            a.push("--cd".to_string());
+            a.push(working_dir.to_string());
             a.push("--skip-git-repo-check".to_string());
             a.push("--full-auto".to_string());
             a.push(message.to_string());
@@ -7756,72 +9587,125 @@ fn handle_send_to_session(server: &Server, args: Value) -> Result<Value, String>
         "gemini" => {
             let gp = if let Some(bc) = Server::read_breadcrumb_state() {
                 format!("{}\n\n{}", bc, message)
-            } else { message.to_string() };
-            let mut a = vec![gemini_cmd().to_string(), "-p".to_string(), gp, "--yolo".to_string()];
-            if let Some(m) = model { a.push("--model".to_string()); a.push(m.to_string()); }
+            } else {
+                message.to_string()
+            };
+            let mut a = vec![
+                gemini_cmd().to_string(),
+                "-p".to_string(),
+                gp,
+                "--yolo".to_string(),
+            ];
+            if let Some(m) = model {
+                a.push("--model".to_string());
+                a.push(m.to_string());
+            }
             (node_cmd(), a, Backend::Gemini)
         }
         _ => {
             let mut a = vec![
-                "-p".to_string(), message.to_string(),
+                "-p".to_string(),
+                message.to_string(),
                 "--continue".to_string(),
                 "--dangerously-skip-permissions".to_string(),
                 "--verbose".to_string(),
-                "--output-format".to_string(), "stream-json".to_string(),
-                "--add-dir".to_string(), working_dir.to_string(),
-                "--add-dir".to_string(), r"C:\temp".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--add-dir".to_string(),
+                working_dir.to_string(),
+                "--add-dir".to_string(),
+                r"C:\temp".to_string(),
             ];
-            if let Some(m) = model { a.push("--model".to_string()); a.push(m.to_string()); }
+            if let Some(m) = model {
+                a.push("--model".to_string());
+                a.push(m.to_string());
+            }
             (claude_code_cmd(), a, Backend::ClaudeCode)
         }
     };
-    
+
     let task_id = format!("{}_turn_{}", session_id, chrono::Utc::now().timestamp());
     let tasks_bg = server.tasks.clone();
     let tid = task_id.clone();
-    
+
     {
         let mut store = server.runtime.block_on(server.tasks.write());
-        store.insert(task_id.clone(), Task {
-            id: task_id.clone(),
-            backend: backend_enum.clone(),
-            prompt: message.to_string(),
-            status: TaskStatus::Running,
-            output: String::new(),
-            error: None,
-            system_prompt: None,
-            model: None,
-            working_dir: None,
-            created_at: chrono::Utc::now(),
-            started_at: Some(chrono::Utc::now()),
-            completed_at: None,
-            progress_lines: 0, steps: Vec::new(), last_activity: None, last_output_chunk_at: None, stall_detected: false, extraction_status: ExtractionStatus::None,
-            trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None, validation_status: ValidationStatus::NotChecked, assertions: Vec::new(), backed_up_files: Vec::new(), retry_count: 0, max_retries: 2, retry_of: None, error_context: None, input_tokens: 0, output_tokens: 0, cost_usd: 0.0,
-            on_complete: None,
-            role: None,
-            save_artifact: false,
-            rerun_of: None,
-            parent_task_id: None,
-            forked_from: None,
-            continuation_of: None,
-            child_pid: None,
-            watchdog_observations: Vec::new(),
-            fingerprint: None,
-            superseded_by: None,
-        label: None,
-        current_step: None,
-        total_steps: None,
-        current_step_desc: None,
-        live_activity: None,
-        effort: None,
-        });
+        store.insert(
+            task_id.clone(),
+            Task {
+                id: task_id.clone(),
+                backend: backend_enum.clone(),
+                prompt: message.to_string(),
+                status: TaskStatus::Running,
+                output: String::new(),
+                error: None,
+                system_prompt: None,
+                model: None,
+                working_dir: None,
+                created_at: chrono::Utc::now(),
+                started_at: Some(chrono::Utc::now()),
+                completed_at: None,
+                progress_lines: 0,
+                steps: Vec::new(),
+                last_activity: None,
+                last_output_chunk_at: None,
+                stall_detected: false,
+                extraction_status: ExtractionStatus::None,
+                trust_score: 0,
+                trust_level: TrustLevel::Low,
+                rollback_path: None,
+                validation_status: ValidationStatus::NotChecked,
+                assertions: Vec::new(),
+                backed_up_files: Vec::new(),
+                retry_count: 0,
+                max_retries: 2,
+                retry_of: None,
+                error_context: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: 0.0,
+                on_complete: None,
+                role: None,
+                save_artifact: false,
+                rerun_of: None,
+                parent_task_id: None,
+                forked_from: None,
+                continuation_of: None,
+                child_pid: None,
+                watchdog_observations: Vec::new(),
+                fingerprint: None,
+                superseded_by: None,
+                label: None,
+                current_step: None,
+                total_steps: None,
+                current_step_desc: None,
+                live_activity: None,
+                effort: None,
+            },
+        );
     }
 
     match backend_enum {
-        Backend::Codex => { server.runtime.spawn(run_codex_task(tasks_bg, tid, cli_args, working_dir.to_string())); }
-        _ => { server.runtime.spawn(run_cli_task(tasks_bg, tid, exe, cli_args, None, StdinMode::Null)); }
+        Backend::Codex => {
+            server.runtime.spawn(run_codex_task(
+                tasks_bg,
+                tid,
+                cli_args,
+                working_dir.to_string(),
+            ));
+        }
+        _ => {
+            server.runtime.spawn(run_cli_task(
+                tasks_bg,
+                tid,
+                exe,
+                cli_args,
+                None,
+                StdinMode::Null,
+            ));
+        }
     }
-    
+
     Ok(json!({
         "task_id": task_id,
         "session_id": session_id,
@@ -7832,7 +9716,10 @@ fn handle_send_to_session(server: &Server, args: Value) -> Result<Value, String>
 
 fn handle_open_terminal(args: Value) -> Result<Value, String> {
     let prompt = args.get("prompt").and_then(|v| v.as_str());
-    let working_dir = args.get("working_dir").and_then(|v| v.as_str()).unwrap_or(r"C:\");
+    let working_dir = args
+        .get("working_dir")
+        .and_then(|v| v.as_str())
+        .unwrap_or(r"C:\");
 
     // Build the claude command that runs inside the terminal
     let mut claude_args = format!("\"{}\"", claude_code_cmd());
@@ -7849,14 +9736,27 @@ fn handle_open_terminal(args: Value) -> Result<Value, String> {
     let title = prompt
         .map(|p| {
             let trimmed: String = p.chars().take(60).collect();
-            if p.len() > 60 { format!("{}...", trimmed) } else { trimmed }
+            if p.len() > 60 {
+                format!("{}...", trimmed)
+            } else {
+                trimmed
+            }
         })
         .unwrap_or_else(|| "Claude Code".to_string());
 
     // Try Windows Terminal first, fall back to cmd start
     let (method, result) = {
         let wt_result = std::process::Command::new("wt")
-            .args(["-w", "0", "new-tab", "--title", &title, "cmd", "/K", &claude_args])
+            .args([
+                "-w",
+                "0",
+                "new-tab",
+                "--title",
+                &title,
+                "cmd",
+                "/K",
+                &claude_args,
+            ])
             .current_dir(working_dir)
             .spawn();
         match wt_result {
@@ -7888,19 +9788,24 @@ fn handle_open_terminal(args: Value) -> Result<Value, String> {
 }
 
 fn handle_gemini_direct(args: Value) -> Result<Value, String> {
-    let prompt = args.get("prompt").and_then(|v| v.as_str())
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
         .ok_or("Missing 'prompt'")?;
-    let working_dir = args.get("working_dir").and_then(|v| v.as_str()).unwrap_or(r"C:\");
-    
+    let working_dir = args
+        .get("working_dir")
+        .and_then(|v| v.as_str())
+        .unwrap_or(r"C:\");
+
     let output = std::process::Command::new(r"C:\Program Files\nodejs\node.exe")
         .args([gemini_cmd(), "--yolo", "-p", prompt])
         .current_dir(working_dir)
         .output()
         .map_err(|e| format!("Gemini CLI failed: {}", e))?;
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    
+
     Ok(json!({
         "success": output.status.success(),
         "output": stdout.trim(),
@@ -7909,17 +9814,28 @@ fn handle_gemini_direct(args: Value) -> Result<Value, String> {
 }
 
 fn handle_codex_exec(args: Value) -> Result<Value, String> {
-    let prompt = args.get("prompt").and_then(|v| v.as_str())
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
         .ok_or("Missing 'prompt'")?;
-    let working_dir = args.get("working_dir").and_then(|v| v.as_str()).unwrap_or(r"C:\rust-mcp");
+    let working_dir = args
+        .get("working_dir")
+        .and_then(|v| v.as_str())
+        .unwrap_or(r"C:\rust-mcp");
     let model = args.get("model").and_then(|v| v.as_str());
     let sandbox = args.get("sandbox").and_then(|v| v.as_str());
-    let full_auto = args.get("full_auto").and_then(|v| v.as_bool()).unwrap_or(false);
-    let skip_approvals = args.get("skip_approvals").and_then(|v| v.as_bool()).unwrap_or(false);
-    
+    let full_auto = args
+        .get("full_auto")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let skip_approvals = args
+        .get("skip_approvals")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     let mut cmd = std::process::Command::new(codex_cmd());
     cmd.arg("exec");
-    
+
     if let Some(m) = model {
         cmd.args(["--model", m]);
     }
@@ -7936,15 +9852,15 @@ fn handle_codex_exec(args: Value) -> Result<Value, String> {
     cmd.arg("--json");
     cmd.arg("--skip-git-repo-check");
     cmd.arg(prompt);
-    
+
     let output = cmd
         .current_dir(working_dir)
         .output()
         .map_err(|e| format!("Codex exec failed: {}", e))?;
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    
+
     Ok(json!({
         "success": output.status.success(),
         "output": stdout.trim(),
@@ -7955,14 +9871,20 @@ fn handle_codex_exec(args: Value) -> Result<Value, String> {
 
 fn handle_codex_review(args: Value) -> Result<Value, String> {
     let prompt = args.get("prompt").and_then(|v| v.as_str());
-    let working_dir = args.get("working_dir").and_then(|v| v.as_str()).unwrap_or(r"C:\rust-mcp");
+    let working_dir = args
+        .get("working_dir")
+        .and_then(|v| v.as_str())
+        .unwrap_or(r"C:\rust-mcp");
     let base = args.get("base").and_then(|v| v.as_str());
-    let uncommitted = args.get("uncommitted").and_then(|v| v.as_bool()).unwrap_or(false);
+    let uncommitted = args
+        .get("uncommitted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let commit = args.get("commit").and_then(|v| v.as_str());
-    
+
     let mut cmd = std::process::Command::new(codex_cmd());
     cmd.arg("review");
-    
+
     if let Some(b) = base {
         cmd.args(["--base", b]);
     }
@@ -7975,15 +9897,15 @@ fn handle_codex_review(args: Value) -> Result<Value, String> {
     if let Some(p) = prompt {
         cmd.arg(p);
     }
-    
+
     let output = cmd
         .current_dir(working_dir)
         .output()
         .map_err(|e| format!("Codex review failed: {}", e))?;
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    
+
     Ok(json!({
         "success": output.status.success(),
         "review": stdout.trim(),
@@ -8007,13 +9929,22 @@ mod tests {
     }
 
     impl TestNotifier {
-        fn new() -> Self { TestNotifier { calls: Mutex::new(Vec::new()) } }
-        fn recorded(&self) -> Vec<(String, String)> { self.calls.lock().unwrap().clone() }
+        fn new() -> Self {
+            TestNotifier {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+        fn recorded(&self) -> Vec<(String, String)> {
+            self.calls.lock().unwrap().clone()
+        }
     }
 
     impl SessionNotifier for TestNotifier {
         fn notify(&self, title: &str, body: &str) -> Result<(), String> {
-            self.calls.lock().unwrap().push((title.to_string(), body.to_string()));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((title.to_string(), body.to_string()));
             Ok(())
         }
     }
@@ -8029,7 +9960,9 @@ mod tests {
             "notify_body": null,
         });
         if let (Value::Object(ref mut b), Value::Object(f)) = (&mut base, flags) {
-            for (k, v) in f { b.insert(k, v); }
+            for (k, v) in f {
+                b.insert(k, v);
+            }
         }
         base
     }
@@ -8041,8 +9974,15 @@ mod tests {
         check_and_fire_session_notify("ses_test01", &meta, &TaskStatus::Done, &n);
         let calls = n.recorded();
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].0.contains("complete"), "title should contain 'complete': {:?}", calls[0].0);
-        assert!(calls[0].1.contains("ses_test01"), "body should contain session id");
+        assert!(
+            calls[0].0.contains("complete"),
+            "title should contain 'complete': {:?}",
+            calls[0].0
+        );
+        assert!(
+            calls[0].1.contains("ses_test01"),
+            "body should contain session id"
+        );
     }
 
     #[test]
@@ -8052,7 +9992,11 @@ mod tests {
         check_and_fire_session_notify("ses_test01", &meta, &TaskStatus::Failed, &n);
         let calls = n.recorded();
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].0.contains("failed"), "title should contain 'failed': {:?}", calls[0].0);
+        assert!(
+            calls[0].0.contains("failed"),
+            "title should contain 'failed': {:?}",
+            calls[0].0
+        );
     }
 
     #[test]
@@ -8060,7 +10004,11 @@ mod tests {
         let n = TestNotifier::new();
         let meta = make_meta(json!({"notify_on_destroy": true}));
         // Simulate the notify path that handle_session_destroy takes
-        if meta.get("notify_on_destroy").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if meta
+            .get("notify_on_destroy")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             fire_notify_for_session(
                 "ses_test01",
                 meta.get("created_at").and_then(|v| v.as_str()),
@@ -8072,7 +10020,11 @@ mod tests {
         }
         let calls = n.recorded();
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].0.contains("destroyed"), "title should contain 'destroyed': {:?}", calls[0].0);
+        assert!(
+            calls[0].0.contains("destroyed"),
+            "title should contain 'destroyed': {:?}",
+            calls[0].0
+        );
     }
 
     #[test]
@@ -8082,7 +10034,11 @@ mod tests {
         let meta = make_meta(json!({}));
         check_and_fire_session_notify("ses_test01", &meta, &TaskStatus::Done, &n);
         check_and_fire_session_notify("ses_test01", &meta, &TaskStatus::Failed, &n);
-        assert_eq!(n.recorded().len(), 0, "no flags set — no notifications expected");
+        assert_eq!(
+            n.recorded().len(),
+            0,
+            "no flags set — no notifications expected"
+        );
     }
 
     #[test]
@@ -8102,7 +10058,8 @@ mod tests {
 
     #[test]
     fn notify_survives_manager_restart_via_meta_persistence() {
-        #[allow(unused_imports)] use std::io::Write;
+        #[allow(unused_imports)]
+        use std::io::Write;
 
         // Write meta.json with notify flags (simulates pre-restart state on disk)
         let tmp = std::env::temp_dir().join("manager_test_ses_restart");
@@ -8116,21 +10073,37 @@ mod tests {
             "notify_title": null,
             "notify_body": null,
         });
-        std::fs::write(&meta_path, serde_json::to_string_pretty(&meta_content).unwrap()).unwrap();
+        std::fs::write(
+            &meta_path,
+            serde_json::to_string_pretty(&meta_content).unwrap(),
+        )
+        .unwrap();
 
         // Simulate manager restart: read meta fresh from disk
         let loaded_str = std::fs::read_to_string(&meta_path).unwrap();
         let loaded_meta: Value = serde_json::from_str(&loaded_str).unwrap();
 
         // Verify flags survived disk round-trip
-        assert_eq!(loaded_meta.get("notify_on_complete").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(loaded_meta.get("notify_on_fail").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            loaded_meta
+                .get("notify_on_complete")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            loaded_meta.get("notify_on_fail").and_then(|v| v.as_bool()),
+            Some(true)
+        );
 
         // Simulate heartbeat detecting session died normally
         let n = TestNotifier::new();
         check_and_fire_session_notify("ses_restart", &loaded_meta, &TaskStatus::Done, &n);
         let calls = n.recorded();
-        assert_eq!(calls.len(), 1, "notify_on_complete should fire after restart");
+        assert_eq!(
+            calls.len(),
+            1,
+            "notify_on_complete should fire after restart"
+        );
         assert!(calls[0].0.contains("complete"));
 
         // Cleanup
@@ -8146,7 +10119,11 @@ mod tests {
         std::fs::write(session_sub.join("meta.json"), "{}").unwrap();
 
         let result = _resolve_session_dir(dir.path()).unwrap();
-        assert_eq!(result, dir.path(), "legacy session dir with meta.json should be returned");
+        assert_eq!(
+            result,
+            dir.path(),
+            "legacy session dir with meta.json should be returned"
+        );
     }
 
     #[test]
@@ -8167,13 +10144,22 @@ mod tests {
     /// final TaskStatus after the restart classification algorithm runs.
     /// `child_alive` controls the fake PID liveness probe result.
     fn classify_on_restart(is_session: bool, had_pid: bool, child_alive: bool) -> TaskStatus {
-        let id = if is_session { "ses_abc123".to_string() } else { "task_abc123".to_string() };
+        let id = if is_session {
+            "ses_abc123".to_string()
+        } else {
+            "task_abc123".to_string()
+        };
         let child_pid: Option<u32> = if had_pid { Some(99999) } else { None };
         let mut status = TaskStatus::Running;
 
         // Mirror the startup logic from Server::new
-        let obs1 = format!("[TEST] Manager restarted — task was {} at load time. Child PID: {}",
-            status, child_pid.map(|p| p.to_string()).unwrap_or_else(|| "unknown".into()));
+        let obs1 = format!(
+            "[TEST] Manager restarted — task was {} at load time. Child PID: {}",
+            status,
+            child_pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "unknown".into())
+        );
         let _ = obs1; // consumed for logic only
 
         if child_alive {
@@ -8193,24 +10179,33 @@ mod tests {
     fn session_alive_at_restart_becomes_orphaned() {
         // (a) session was alive at Desktop quit, child still running at startup → orphaned
         let result = classify_on_restart(true, true, true);
-        assert_eq!(result, TaskStatus::Orphaned,
-            "alive session after restart must be orphaned (pipes are gone)");
+        assert_eq!(
+            result,
+            TaskStatus::Orphaned,
+            "alive session after restart must be orphaned (pipes are gone)"
+        );
     }
 
     #[test]
     fn session_dead_at_restart_becomes_failed() {
         // (b) session was alive at Desktop quit, child dead at startup → failed
         let result = classify_on_restart(true, true, false);
-        assert_eq!(result, TaskStatus::Failed,
-            "session whose child died during restart must be marked failed");
+        assert_eq!(
+            result,
+            TaskStatus::Failed,
+            "session whose child died during restart must be marked failed"
+        );
     }
 
     #[test]
     fn non_session_alive_at_restart_stays_running() {
         // Non-session task (task_) alive → stays Running (existing behavior unchanged)
         let result = classify_on_restart(false, true, true);
-        assert_eq!(result, TaskStatus::Running,
-            "non-session tasks with alive child must stay Running");
+        assert_eq!(
+            result,
+            TaskStatus::Running,
+            "non-session tasks with alive child must stay Running"
+        );
     }
 
     #[test]
@@ -8226,13 +10221,24 @@ mod tests {
                 "owner": "claude"
             }
         });
-        std::fs::write(bc_dir.join("active.index.json"),
-            serde_json::to_string(&index).unwrap()).unwrap();
+        std::fs::write(
+            bc_dir.join("active.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
 
         let line = read_breadcrumb_status_line_from(tmp.path().to_str().unwrap());
 
-        assert!(line.starts_with("active:"), "single bc must show active:<name>, got: {}", line);
-        assert!(line.contains("fix something"), "must include bc name, got: {}", line);
+        assert!(
+            line.starts_with("active:"),
+            "single bc must show active:<name>, got: {}",
+            line
+        );
+        assert!(
+            line.contains("fix something"),
+            "must include bc name, got: {}",
+            line
+        );
     }
 
     #[test]
@@ -8245,14 +10251,29 @@ mod tests {
             "bc_002": {"id": "bc_002", "project_id": "proj_a", "name": "task two", "owner": "claude"},
             "bc_003": {"id": "bc_003", "project_id": "proj_b", "name": "task three", "owner": "claude"}
         });
-        std::fs::write(bc_dir.join("active.index.json"),
-            serde_json::to_string(&index).unwrap()).unwrap();
+        std::fs::write(
+            bc_dir.join("active.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
 
         let line = read_breadcrumb_status_line_from(tmp.path().to_str().unwrap());
 
-        assert!(line.starts_with("3 active"), "3 bcs must show count, got: {}", line);
-        assert!(line.contains("proj_a: 2"), "proj_a has 2 entries, got: {}", line);
-        assert!(line.contains("proj_b: 1"), "proj_b has 1 entry, got: {}", line);
+        assert!(
+            line.starts_with("3 active"),
+            "3 bcs must show count, got: {}",
+            line
+        );
+        assert!(
+            line.contains("proj_a: 2"),
+            "proj_a has 2 entries, got: {}",
+            line
+        );
+        assert!(
+            line.contains("proj_b: 1"),
+            "proj_b has 1 entry, got: {}",
+            line
+        );
     }
 
     #[test]
@@ -8264,7 +10285,11 @@ mod tests {
 
         let line = read_breadcrumb_status_line_from(tmp.path().to_str().unwrap());
 
-        assert_eq!(line, "none", "empty index must return 'none', got: {}", line);
+        assert_eq!(
+            line, "none",
+            "empty index must return 'none', got: {}",
+            line
+        );
     }
 
     // =========================================================================
@@ -8274,9 +10299,9 @@ mod tests {
     #[test]
     fn api_status_shape_has_required_keys() {
         // Build a minimal in-memory AppState and call dash_api_status synchronously
+        use std::sync::Arc;
         use tokio::runtime::Runtime;
         use tokio::sync::RwLock as TokioRwLock;
-        use std::sync::Arc;
 
         let rt = Runtime::new().unwrap();
         let tasks: Arc<TokioRwLock<HashMap<String, Task>>> =
@@ -8315,7 +10340,10 @@ mod tests {
         let Json(v) = rt.block_on(dash_api_config());
 
         assert!(v.get("ports").is_some(), "must have 'ports'");
-        assert!(v.get("poll_intervals_ms").is_some(), "must have 'poll_intervals_ms'");
+        assert!(
+            v.get("poll_intervals_ms").is_some(),
+            "must have 'poll_intervals_ms'"
+        );
         assert!(v.get("version").is_some(), "must have 'version'");
 
         let ports = &v["ports"];
@@ -8324,7 +10352,11 @@ mod tests {
         }
         let intervals = &v["poll_intervals_ms"];
         for key in &["manager", "local", "hands", "workflow", "autonomous"] {
-            assert!(intervals.get(key).is_some(), "poll_intervals_ms must have '{}'", key);
+            assert!(
+                intervals.get(key).is_some(),
+                "poll_intervals_ms must have '{}'",
+                key
+            );
         }
     }
 
@@ -8337,7 +10369,11 @@ mod tests {
         let v = handle_dashboard_status();
         assert_eq!(v["running"], false, "must be not running");
         assert_eq!(v["port"], 0, "port must be 0 when stopped");
-        assert_eq!(v["url"].as_str().unwrap_or("x"), "", "url must be empty when stopped");
+        assert_eq!(
+            v["url"].as_str().unwrap_or("x"),
+            "",
+            "url must be empty when stopped"
+        );
 
         // Simulate a running dashboard on port 9100
         DASHBOARD_PORT.store(9100, Ordering::SeqCst);
@@ -8346,7 +10382,10 @@ mod tests {
         let v2 = handle_dashboard_status();
         assert_eq!(v2["running"], true);
         assert_eq!(v2["port"], 9100);
-        assert!(v2["url"].as_str().unwrap_or("").contains("9100"), "url must contain port");
+        assert!(
+            v2["url"].as_str().unwrap_or("").contains("9100"),
+            "url must contain port"
+        );
 
         // Cleanup
         DASHBOARD_PORT.store(0, Ordering::SeqCst);
