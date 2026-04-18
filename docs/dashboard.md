@@ -34,21 +34,24 @@ the current state.
 
 ## Default ports
 
-| Server     | Default port | Env override                                 |
-|------------|--------------|----------------------------------------------|
-| manager    | 9100         | `CPC_DASHBOARD_PORT` or `CPC_MANAGER_PORT`   |
-| local      | 9101         | `CPC_DASHBOARD_PORT_LOCAL`                   |
-| hands      | 9102         | `CPC_DASHBOARD_PORT_HANDS`                   |
-| workflow   | 9103         | `CPC_DASHBOARD_PORT_WORKFLOW`                |
-| autonomous | 9104         | `CPC_DASHBOARD_PORT_AUTONOMOUS`              |
+| Server   | Default port | Env override                                 |
+|----------|--------------|----------------------------------------------|
+| manager  | 9100         | `CPC_DASHBOARD_PORT` or `CPC_MANAGER_PORT`   |
+| local    | 9101         | `CPC_DASHBOARD_PORT_LOCAL`                   |
+| hands    | 9102         | `CPC_DASHBOARD_PORT_HANDS`                   |
+| workflow | 9103         | `CPC_DASHBOARD_PORT_WORKFLOW`                |
+
+Ports 9104+ are reserved for additional CPC servers outside the public
+distribution; the dashboard discovers them dynamically and falls back
+gracefully when they are not running.
 
 Each server binds `127.0.0.1` only. If the primary port is taken, it
 tries the next 5 consecutively. Port collisions between servers are
 detected client-side via the `server` discriminator field in each
 `/api/status` response.
 
-All five servers now use **axum** for their HTTP endpoints (unified as
-of 2026-04-16). Previously local/hands/workflow used `tiny-http` which
+All servers use **axum** for their HTTP endpoints (unified as of
+2026-04-16). Previously local/hands/workflow used `tiny-http` which
 had keep-alive connection exhaustion issues under browser load — the
 axum migration eliminates that class of bug.
 
@@ -59,9 +62,10 @@ axum migration eliminates that class of bug.
 The dashboard is organized in zones, top to bottom:
 
 **Top strip — service health pills**
-One pill per server (manager, local, hands, workflow, autonomous, voice).
-Green dot + version when reachable. Grey italic "offline" when not.
-Voice is offline by design unless voice mode is active.
+One pill per server (manager, local, hands, workflow, plus voice and any
+additional CPC servers discovered at runtime). Green dot + version when
+reachable. Grey italic "offline" when not. Voice is offline by design
+unless voice mode is active.
 
 **Active sessions and tasks**
 Cards for each running session/task with:
@@ -80,9 +84,8 @@ Cards for each running session/task with:
 | Active Loafs | Project Loafs in progress (multi-task coordination) |
 | Active Breadcrumb | Current multi-step operation with step count |
 | Completed Today | Summary of finished work |
-| Autonomous Pulse | Extractions, reminders, recent topics |
 
-**Service detail panels** (HANDS, WORKFLOW, AUTONOMOUS)
+**Service detail panels** (HANDS, WORKFLOW, and any other servers exposing `/api/status`)
 Per-server stats pulled from each server's `/api/status`.
 
 ---
@@ -96,7 +99,6 @@ Per-server stats pulled from each server's `/api/status`.
 | Scorecard | manager + local | Running count, done today, failed, orphaned, extractions, .exe.old count |
 | Hands | `hands:9102/api/status` | Browser status, current URL, tab count, contexts |
 | Workflow | `workflow:9103/api/status` | Credential count, TOTP entries, flows, active watches |
-| Autonomous | `autonomous:9104/api/status` | Pending extractions, reminders due, top topics by growth |
 
 ---
 
@@ -147,7 +149,7 @@ host is expensive.
 Applications in CPC:
 - Dashboard HTML/CSS/JS (this doc)
 - Skill content (reloadable without MCP server restart)
-- CATALOG.md routing rules (disk-loaded by autonomous)
+- Knowledge-base routing rules (disk-loaded at startup)
 - Operating file templates
 
 **When NOT to use the decouple pattern:** Config schemas, tool
@@ -163,7 +165,7 @@ The dashboard auto-collapses any server that fails 2 consecutive polls
 running, panels for the missing servers disappear and a footer shows:
 
 ```
-3 additional servers not detected (hands, workflow, autonomous) — Show all
+N additional servers not detected (hands, workflow, ...) — Show all
 ```
 
 Clicking **Show all** forces all panels visible. If a collapsed server
@@ -176,8 +178,8 @@ have responded at least once get a dot.
 
 ## live_status.json piggyback
 
-Every 30 seconds, manager polls all 5 server endpoints and writes a
-snapshot to:
+Every 30 seconds, manager polls every discovered server endpoint and
+writes a snapshot to:
 
 ```
 C:\My Drive\Volumes\dashboard\live_status.json
@@ -194,7 +196,7 @@ browser dashboard, serialized as JSON with a `timestamp` field.
 | Action | What it does |
 |--------|-------------|
 | Clean .exe.old | POSTs to `local:9101/api/action/clean_old` — deletes `*.exe.old` from the server install directory |
-| GitHub ↗ | Opens the GitHub release page for any of the 5 servers |
+| GitHub ↗ | Opens the GitHub release page for any CPC server |
 | Path copyable | Copies `C:\My Drive\Volumes` to clipboard |
 
 ---
@@ -214,7 +216,7 @@ Switch via the view selector in the top-right.
 ## Poll intervals
 
 Manager and local poll every **5 seconds**.
-Hands, workflow, and autonomous poll every **42 seconds**
+Hands, workflow, and other secondary servers poll every **42 seconds**
 (lower priority, heavier payloads).
 
 ---
@@ -229,7 +231,7 @@ to the embedded version:
 Remove-Item C:\CPC\dashboard\dashboard.html
 ```
 
-**Local / hands / workflow / autonomous pill shows "offline"**
+**Local / hands / workflow pill shows "offline"**
 That server process isn't running. Check `manager:status_bar` for the
 server list. If the server is running but still shows offline, check
 whether its port is bound by something else:
