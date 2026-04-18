@@ -4,6 +4,12 @@ All notable changes to the Manager MCP Server are documented here.
 
 ## [Unreleased]
 
+## [1.3.8] - 2026-04-18
+
+### Added
+
+- **Active Operations tap panel** -- Dashboard Zone 2 ("Active Operations") now aggregates breadcrumbs from all CPC servers via `active.index.json`, enriched with step details from project JSONL files. Each entry shows a server tag (`[cpc]`, `[local]`, `[autonomous]`), progress bar, elapsed time, and owner. Click/tap any card to expand the full steps list with per-step status (done/current/pending). Deduplicates across sources and falls back to polled server data when available.
+
 ## [1.3.7] - 2026-04-17
 
 ### Added

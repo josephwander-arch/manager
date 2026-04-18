@@ -96,10 +96,21 @@ select.filter-select { background: var(--bg-card); color: var(--text-secondary);
 .session-card.expanded .card-detail { display: block; }
 
 /* Breadcrumb card */
-.bc-card { background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+.bc-card { background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; cursor: pointer; transition: border-color 0.2s; }
+.bc-card:hover { border-color: var(--accent-blue); }
 .bc-card.stale { border-color: var(--accent-amber); box-shadow: 0 0 8px rgba(245,158,11,0.15); }
 .bc-progress-bar { height: 5px; background: var(--border); border-radius: 3px; margin: 5px 0; overflow: hidden; }
 .bc-progress-fill { height: 100%; background: var(--accent-green); border-radius: 3px; transition: width 0.3s; }
+.bc-server-tag { display: inline-block; font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 600; margin-right: 4px; }
+.bc-server-tag.local { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
+.bc-server-tag.autonomous { background: rgba(168,85,247,0.15); color: #a855f7; }
+.bc-server-tag.cpc-state { background: rgba(34,197,94,0.15); color: var(--accent-green); }
+.bc-steps-detail { display: none; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 10px; }
+.bc-card.expanded .bc-steps-detail { display: block; }
+.bc-step-row { display: flex; align-items: center; gap: 4px; padding: 2px 0; color: var(--text-secondary); }
+.bc-step-row.done { color: var(--accent-green); }
+.bc-step-row.current { color: var(--accent-blue); font-weight: 600; }
+.bc-owner-tag { font-size: 9px; color: var(--text-secondary); opacity: 0.7; }
 .bc-progress-label { font-size: 10px; color: var(--text-secondary); margin-top: 2px; }
 .bc-meta { font-size: 11px; color: var(--text-secondary); display: flex; gap: 10px; flex-wrap: wrap; margin-top: 3px; }
 
@@ -390,7 +401,7 @@ body.no-services .panel-body { max-height: 520px; }
     <div class="zone-body" id="zone-loafs-body"><span style="color:var(--text-secondary)">—</span></div>
   </div>
   <div class="zone-card">
-    <div class="zone-title">Active Breadcrumbs</div>
+    <div class="zone-title">Active Operations</div>
     <div class="zone-body" id="zone-breadcrumb-body"><span style="color:var(--text-secondary)">—</span></div>
   </div>
   <div class="zone-card">
@@ -762,43 +773,97 @@ function renderBottomStrip() {
     loafBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">No active loaf</span>';
   }
 
-  // Zone 2: Active Breadcrumbs (from local, fallback to manager status_bar)
-  // v1.3.4: widget already iterates all actives; added explicit sort newest-first
+  // Zone 2: Active Breadcrumbs — merged from manager's aggregated CPC state + polled servers
+  // v1.3.8: tap-to-expand panel with steps detail, server tags, multi-source merge
   const bcBody = document.getElementById('zone-breadcrumb-body');
-  if (ldata?.breadcrumbs) {
-    const bcs2 = Array.isArray(ldata.breadcrumbs) ? ldata.breadcrumbs : (ldata.breadcrumbs.active ?? []);
-    const active = bcs2.filter(b => !b.aborted && (b.current_step ?? b.steps_completed ?? 0) < (b.total_steps ?? 0))
-      .sort((a, b) => {
-        // Newest first by started_at (or created_at fallback)
-        const aT = new Date(a.started_at || a.created_at || 0).getTime();
-        const bT = new Date(b.started_at || b.created_at || 0).getTime();
-        return bT - aT;
-      });
-    if (active.length > 0) {
-      bcBody.innerHTML = active.map(b => {
-        const cur = b.current_step ?? b.steps_completed ?? 0;
-        const tot = b.total_steps ?? 0;
-        const pct = tot > 0 ? Math.round(cur / tot * 100) : 0;
-        // Time since start
-        let timeSince = '';
-        const startedAt = b.started_at || b.created_at;
-        if (startedAt) {
-          const ms = Date.now() - new Date(startedAt).getTime();
-          if (!isNaN(ms) && ms > 0) timeSince = fmtDuration(ms);
-        }
-        // Last step result — truncated to 80 chars
-        const lastResult = b.last_step_result || b.last_step || '';
-        const truncResult = lastResult.length > 80 ? lastResult.slice(0, 77) + '...' : lastResult;
-        return `<div style="margin-bottom:4px">
-          <div style="font-size:11px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(b.name||b.id)}">${escHtml(b.name||b.id)}</div>
-          <div class="bc-progress-bar" style="margin:3px 0 2px"><div class="bc-progress-fill" style="width:${pct}%"></div></div>
-          <div style="font-size:10px;color:var(--text-secondary)">step ${cur}/${tot} · ${pct}%${timeSince ? ` · ${timeSince}` : ''}</div>
-          ${truncResult ? `<div style="font-size:10px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(lastResult)}">${escHtml(truncResult)}</div>` : ''}
-        </div>`;
-      }).join('');
-    } else {
-      bcBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px;opacity:0.5">No active operation</span>';
+  const allBcs = [];
+  const seenIds = new Set();
+
+  // Source 1: manager aggregated active_breadcrumbs (reads CPC state/breadcrumbs/active.index.json)
+  if (mdata?.active_breadcrumbs) {
+    for (const b of mdata.active_breadcrumbs) {
+      if (b.aborted) continue;
+      const key = b.id || b.name;
+      if (!seenIds.has(key)) { seenIds.add(key); allBcs.push({...b, _source: b.source || 'cpc-state'}); }
     }
+  }
+
+  // Source 2: local server breadcrumbs (if polling returns them)
+  if (ldata?.breadcrumbs) {
+    const lbcs = Array.isArray(ldata.breadcrumbs) ? ldata.breadcrumbs : (ldata.breadcrumbs.active ?? []);
+    for (const b of lbcs) {
+      if (b.aborted) continue;
+      const key = b.id || b.name;
+      if (!seenIds.has(key)) { seenIds.add(key); allBcs.push({...b, _source: 'local'}); }
+    }
+  }
+
+  // Source 3: autonomous server breadcrumbs (if polling returns them)
+  if (adata?.breadcrumbs) {
+    const abcs = Array.isArray(adata.breadcrumbs) ? adata.breadcrumbs : (adata.breadcrumbs.active ?? []);
+    for (const b of abcs) {
+      if (b.aborted) continue;
+      const key = b.id || b.name;
+      if (!seenIds.has(key)) { seenIds.add(key); allBcs.push({...b, _source: 'autonomous'}); }
+    }
+  }
+
+  // Filter to active-only and sort newest-first
+  const activeBcs = allBcs
+    .filter(b => {
+      const cur = b.current_step ?? b.steps_completed ?? 0;
+      const tot = b.total_steps ?? 0;
+      return tot === 0 || cur < tot;
+    })
+    .sort((a, b) => {
+      const aT = new Date(a.started_at || a.created_at || 0).getTime();
+      const bT = new Date(b.started_at || b.created_at || 0).getTime();
+      return bT - aT;
+    });
+
+  if (activeBcs.length > 0) {
+    bcBody.innerHTML = activeBcs.map(b => {
+      const cur = b.current_step ?? b.steps_completed ?? 0;
+      const tot = b.total_steps ?? 0;
+      const pct = tot > 0 ? Math.round(cur / tot * 100) : 0;
+      let timeSince = '';
+      const startedAt = b.started_at || b.created_at;
+      if (startedAt) {
+        const ms = Date.now() - new Date(startedAt).getTime();
+        if (!isNaN(ms) && ms > 0) timeSince = fmtDuration(ms);
+      }
+      const srcClass = b._source === 'local' ? 'local' : b._source === 'autonomous' ? 'autonomous' : 'cpc-state';
+      const srcLabel = b._source === 'cpc-state' ? 'cpc' : b._source;
+      const bcId = 'bc-' + (b.id || '').replace(/[^a-zA-Z0-9_-]/g, '');
+
+      // Steps detail (expandable)
+      let stepsHtml = '';
+      if (b.steps && Array.isArray(b.steps) && b.steps.length > 0) {
+        const stepResults = b.step_results || [];
+        stepsHtml = b.steps.map((s, i) => {
+          const isDone = i < cur;
+          const isCurrent = i === cur;
+          const cls = isDone ? 'done' : isCurrent ? 'current' : '';
+          const icon = isDone ? '✓' : isCurrent ? '▸' : '·';
+          const result = stepResults[i] || '';
+          const resultTrunc = result.length > 60 ? result.slice(0, 57) + '...' : result;
+          return `<div class="bc-step-row ${cls}">${icon} <span>${escHtml(typeof s === 'string' ? s : (s.name || s.description || ''))}</span>${resultTrunc ? `<span style="margin-left:auto;opacity:0.6" title="${escHtml(result)}">${escHtml(resultTrunc)}</span>` : ''}</div>`;
+        }).join('');
+      }
+      const ownerHtml = b.owner ? `<span class="bc-owner-tag">${escHtml(b.owner)}</span>` : '';
+      const projHtml = b.project_id ? `<span class="bc-owner-tag">${escHtml(b.project_id)}</span>` : '';
+
+      return `<div class="bc-card" id="${bcId}" onclick="this.classList.toggle('expanded')">
+        <div style="display:flex;align-items:center;gap:4px">
+          <span class="bc-server-tag ${srcClass}">${escHtml(srcLabel)}</span>
+          <span style="font-size:11px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="${escHtml(b.name||b.id)}">${escHtml(b.name||b.id)}</span>
+          ${ownerHtml}${projHtml}
+        </div>
+        <div class="bc-progress-bar"><div class="bc-progress-fill" style="width:${pct}%"></div></div>
+        <div style="font-size:10px;color:var(--text-secondary)">step ${cur}/${tot} · ${pct}%${timeSince ? ` · ${timeSince}` : ''}</div>
+        ${stepsHtml ? `<div class="bc-steps-detail">${stepsHtml}</div>` : ''}
+      </div>`;
+    }).join('');
   } else if (mdata?.status_bar?.breadcrumb && mdata.status_bar.breadcrumb !== 'none') {
     bcBody.innerHTML = `<div style="font-size:11px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(mdata.status_bar.breadcrumb)}</div>
       <div style="font-size:10px;color:var(--text-secondary)">From manager status_bar</div>`;

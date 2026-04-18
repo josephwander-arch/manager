@@ -3841,6 +3841,107 @@ fn read_state_file(path: &str) -> Option<String> {
     }
 }
 
+/// Read all active breadcrumbs with full detail for the dashboard tap panel.
+/// Reads `active.index.json` for the list, then enriches each entry from its
+/// project JSONL file (which has steps[], current_step, step_results, etc.).
+/// Returns a JSON array sorted newest-first.
+fn read_active_breadcrumbs_full() -> Vec<Value> {
+    let cpc_state = std::env::var("CPC_STATE_DIR").unwrap_or_else(|_| r"C:\CPC\state".to_string());
+    let index_path = format!(r"{}\breadcrumbs\active.index.json", cpc_state);
+    let Ok(content) = std::fs::read_to_string(&index_path) else {
+        return Vec::new();
+    };
+    let Ok(index) = serde_json::from_str::<Value>(&content) else {
+        return Vec::new();
+    };
+    let Some(obj) = index.as_object() else {
+        return Vec::new();
+    };
+
+    let projects_dir = format!(r"{}\breadcrumbs\projects", cpc_state);
+    let mut results: Vec<Value> = Vec::new();
+
+    for (_key, bc) in obj.iter() {
+        let id = bc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let project_id = bc
+            .get("project_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ungrouped");
+        let name = bc.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        let owner = bc
+            .get("owner")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let started_at = bc
+            .get("started_at")
+            .or_else(|| bc.get("last_activity_at"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // Try to enrich from the project JSONL file
+        let jsonl_path = format!(r"{}\{}.jsonl", projects_dir, project_id);
+        let enriched = std::fs::read_to_string(&jsonl_path)
+            .ok()
+            .and_then(|content| {
+                // Find the last line matching this breadcrumb ID (most recent update)
+                content
+                    .lines()
+                    .rev()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .find(|entry| entry.get("id").and_then(|v| v.as_str()) == Some(id))
+            });
+
+        let mut entry = json!({
+            "id": id,
+            "project_id": project_id,
+            "name": name,
+            "owner": owner,
+            "started_at": started_at,
+            "source": "cpc-state",
+        });
+
+        if let Some(full) = enriched {
+            // Copy enrichment fields from JSONL entry
+            if let Some(steps) = full.get("steps") {
+                entry["steps"] = steps.clone();
+            }
+            if let Some(cs) = full.get("current_step") {
+                entry["current_step"] = cs.clone();
+            }
+            if let Some(ts) = full.get("total_steps") {
+                entry["total_steps"] = ts.clone();
+            }
+            if let Some(sr) = full.get("step_results") {
+                entry["step_results"] = sr.clone();
+            }
+            if let Some(fc) = full.get("files_changed") {
+                entry["files_changed"] = fc.clone();
+            }
+            if let Some(ab) = full.get("aborted") {
+                entry["aborted"] = ab.clone();
+            }
+            if let Some(la) = full.get("last_activity_at") {
+                entry["last_activity_at"] = la.clone();
+            }
+        } else {
+            // Minimal info from index only
+            entry["current_step"] = json!(0);
+            entry["total_steps"] = json!(0);
+        }
+
+        results.push(entry);
+    }
+
+    // Sort newest-first by started_at
+    results.sort_by(|a, b| {
+        let ta = a.get("started_at").and_then(|v| v.as_str()).unwrap_or("");
+        let tb = b.get("started_at").and_then(|v| v.as_str()).unwrap_or("");
+        tb.cmp(ta)
+    });
+
+    results
+}
+
 /// Read active loaf summary for status_bar
 fn read_active_loaf_summary() -> String {
     match find_active_loaf() {
@@ -8298,9 +8399,10 @@ async fn dash_api_status(State(st): State<DashboardState>) -> Json<Value> {
     cross_tools.truncate(5);
 
     let pending_swaps = count_pending_swaps();
+    let active_breadcrumbs = read_active_breadcrumbs_full();
 
     Json(json!({
-        "version": "1.3.7",
+        "version": "1.3.8",
         "sessions": {
             "running": running,
             "queued": queued,
@@ -8315,6 +8417,7 @@ async fn dash_api_status(State(st): State<DashboardState>) -> Json<Value> {
         "recent_tool_calls": recent_calls,
         "cross_server_recent_tools": cross_tools,
         "pending_swaps": pending_swaps,
+        "active_breadcrumbs": active_breadcrumbs,
         "timestamp": Utc::now().to_rfc3339(),
     }))
 }
@@ -8337,7 +8440,7 @@ async fn dash_api_config() -> Json<Value> {
             "workflow":   42000u32,
             "autonomous": 42000u32,
         },
-        "version": "1.3.7",
+        "version": "1.3.8",
     }))
 }
 

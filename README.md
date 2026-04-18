@@ -11,13 +11,13 @@ One MCP server. Four backends. Server-side blocking. Durable coordination.
 
 ---
 
-## What's New in v1.3.7
+## What's New in v1.3.8
 
-**Dashboard quick-wins bundle.** Three new dashboard features:
+**Active Operations tap panel.** Dashboard Zone 2 now aggregates breadcrumbs from all CPC servers into a single clickable panel:
 
-- **Live step counter** -- task cards show `[N/M]` tool-step progress parsed from the `steps[]` array
-- **Cross-server last-5-tools** -- bottom strip merges tool calls from all servers via log tailing + API polling
-- **Pending-swap counter** -- scorecard shows how many `.new` binaries await manual deploy swap
+- **Multi-source merge** -- reads `active.index.json` (CPC state) enriched with project JSONL step data, plus polled breadcrumbs from local and autonomous servers
+- **Server tags** -- each entry tagged `[cpc]`, `[local]`, or `[autonomous]` with color-coded badges
+- **Tap-to-expand** -- click any card to reveal the full steps list with done/current/pending indicators, per-step results, owner, and project ID
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
@@ -25,6 +25,10 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 <details>
 <summary>Older Releases</summary>
+
+### v1.3.7 — Dashboard Quick-Wins
+
+- Live step counter, cross-server last-5-tools widget, pending-swap counter
 
 ### v1.2.8 — Operational Dashboard
 
@@ -126,7 +130,7 @@ budgets — let them write code.
 
 ### Windows x64
 
-1. Download `manager-v1.3.6-x64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
+1. Download `manager-v1.3.8-x64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
 2. Rename to `manager.exe` and place in `%LOCALAPPDATA%\CPC\servers\`.
 3. Add to your `claude_desktop_config.json`:
    ```json
@@ -144,7 +148,7 @@ budgets — let them write code.
 
 ### Windows ARM64
 
-1. Download `manager-v1.3.6-aarch64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
+1. Download `manager-v1.3.8-aarch64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
 2. Rename to `manager.exe` and place in `%LOCALAPPDATA%\CPC\servers\`.
 3. Add to your `claude_desktop_config.json`:
    ```json
