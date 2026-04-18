@@ -11,7 +11,7 @@ One MCP server. Four backends. Server-side blocking. Durable coordination.
 
 ---
 
-## What's New in v1.3.0
+## What's New in v1.3.5
 
 **StdinMode v2, stall watchdog, and Dashboard v1.3.**
 

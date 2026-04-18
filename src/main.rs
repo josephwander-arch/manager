@@ -375,17 +375,15 @@ enum ExtractionStatus {
     TooSimple,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 enum TrustLevel {
     #[default]
-    Low,    // 1-3: fire and forget
+    Low, // 1-3: fire and forget
     Medium, // 4-6: auto-backup before start
     High,   // 7-10: backup + require diff review
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -397,7 +395,6 @@ enum ValidationStatus {
     Failed,
     Skipped,
 }
-
 
 fn default_max_retries() -> u32 {
     2
@@ -1794,8 +1791,8 @@ async fn run_gpt_task(
                 Server::save_to_history(task);
                 // v1.3.2 (Opus review): fire task notify on early-exit before lock release
                 check_and_fire_task_notify(task, &RealNotifier);
-        // v1.3.4: auto-advance loaf phase if task was linked to current phase
-        auto_advance_loaf_on_task_complete(task);
+                // v1.3.4: auto-advance loaf phase if task was linked to current phase
+                auto_advance_loaf_on_task_complete(task);
             }
             if let Some(ref rt) = retry_task {
                 store.insert(rt.id.clone(), rt.clone());
@@ -2170,8 +2167,8 @@ async fn run_cli_task(
                 Server::save_to_history(task);
                 // v1.3.1: task notify
                 check_and_fire_task_notify(task, &RealNotifier);
-        // v1.3.4: auto-advance loaf phase if task was linked to current phase
-        auto_advance_loaf_on_task_complete(task);
+                // v1.3.4: auto-advance loaf phase if task was linked to current phase
+                auto_advance_loaf_on_task_complete(task);
             }
             if let Some(ref rt) = retry_task {
                 store.insert(rt.id.clone(), rt.clone());
@@ -3523,7 +3520,7 @@ fn handle_list_tasks(server: &Server, params: Value) -> Result<Value, String> {
         })
         .collect();
 
-    tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    tasks.sort_by_key(|t| std::cmp::Reverse(t.created_at));
     tasks.truncate(limit);
 
     let summary: Vec<Value> = tasks
@@ -4878,7 +4875,9 @@ fn handle_decompose_task(args: Value) -> Result<Value, String> {
                 raw_steps.push(buf.trim().to_string());
                 buf.clear();
             }
-            let content = trimmed.split_once(['.', ')']).map(|x| x.1)
+            let content = trimmed
+                .split_once(['.', ')'])
+                .map(|x| x.1)
                 .unwrap_or(trimmed)
                 .trim();
             buf = content.to_string();
@@ -5263,14 +5262,14 @@ fn auto_advance_loaf_on_task_complete(task: &Task) {
             return;
         }
     };
-    let phases_mut = match loaf_live
-        .get_mut("phases")
-        .and_then(|p| p.as_array_mut())
-    {
+    let phases_mut = match loaf_live.get_mut("phases").and_then(|p| p.as_array_mut()) {
         Some(p) => p,
         None => return,
     };
-    if let Some(phase_obj) = phases_mut.get_mut(phase_idx).and_then(|p| p.as_object_mut()) {
+    if let Some(phase_obj) = phases_mut
+        .get_mut(phase_idx)
+        .and_then(|p| p.as_object_mut())
+    {
         phase_obj.insert("status".into(), json!("done"));
         phase_obj.insert("completed_at".into(), json!(Utc::now().to_rfc3339()));
         phase_obj.insert("completed_by_task".into(), json!(task.id));
@@ -5289,13 +5288,19 @@ fn auto_advance_loaf_on_task_complete(task: &Task) {
         loaf_live["completed_at"] = json!(Utc::now().to_rfc3339());
     }
     // Append breadcrumb event for audit trail
-    if let Some(bc_arr) = loaf_live.get_mut("breadcrumbs").and_then(|b| b.as_array_mut()) {
+    if let Some(bc_arr) = loaf_live
+        .get_mut("breadcrumbs")
+        .and_then(|b| b.as_array_mut())
+    {
         bc_arr.push(json!({
             "timestamp": Utc::now().to_rfc3339(),
             "event": format!("Phase '{}' auto-advanced on task {} complete", current_phase_name, task.id),
         }));
     }
-    match std::fs::write(&path, serde_json::to_string_pretty(&loaf_live).unwrap_or_default()) {
+    match std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&loaf_live).unwrap_or_default(),
+    ) {
         Ok(_) => info!(
             "auto_advance_loaf: {} phase '{}' → done (task {})",
             loaf_id, current_phase_name, task.id
@@ -5700,8 +5705,7 @@ fn handle_list_sessions(server: &Server, args: Value) -> Result<Value, String> {
                     // v1.2.3: include_stalled filter — only show stalled sessions
                     if include_stalled {
                         let is_stalled = alive
-                            && last_activity
-                                .is_none_or(|la| (Utc::now() - la).num_seconds() > 120);
+                            && last_activity.is_none_or(|la| (Utc::now() - la).num_seconds() > 120);
                         if !is_stalled {
                             continue;
                         }
@@ -7549,7 +7553,7 @@ async fn dash_status(State(st): State<DashboardState>) -> Json<Value> {
         .filter(|t| t.status == TaskStatus::Done)
         .count();
     let mut tasks: Vec<&Task> = store.values().collect();
-    tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    tasks.sort_by_key(|t| std::cmp::Reverse(t.created_at));
     let tasks_json: Vec<Value> = tasks
         .iter()
         .map(|t| {
@@ -7941,7 +7945,7 @@ async fn dash_knowledge() -> Json<Value> {
             }
         }
     }
-    recent.sort_by(|a, b| b.1.cmp(&a.1));
+    recent.sort_by_key(|r| std::cmp::Reverse(r.1));
     recent.truncate(10);
     let recent_json: Vec<Value> = recent
         .iter()
@@ -8215,7 +8219,7 @@ async fn dash_api_status(State(st): State<DashboardState>) -> Json<Value> {
         .count();
 
     let mut tasks: Vec<&Task> = store.values().collect();
-    tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    tasks.sort_by_key(|t| std::cmp::Reverse(t.created_at));
     let tasks_json: Vec<Value> = tasks
         .iter()
         .take(20)
@@ -9575,10 +9579,9 @@ fn fire_notify_for_session(
             notify_title_override.unwrap_or(&default_title),
             notify_body_override.unwrap_or(&default_body),
         ),
-        NotifyReason::Failed | NotifyReason::Destroyed => (
-            default_title.as_str(),
-            default_body.as_str(),
-        ),
+        NotifyReason::Failed | NotifyReason::Destroyed => {
+            (default_title.as_str(), default_body.as_str())
+        }
     };
     let icon = match reason {
         NotifyReason::Completed => "info",
@@ -9670,10 +9673,9 @@ fn fire_notify_for_task(
             notify_title_override.unwrap_or(&default_title),
             notify_body_override.unwrap_or(&default_body),
         ),
-        NotifyReason::Failed | NotifyReason::Destroyed => (
-            default_title.as_str(),
-            default_body.as_str(),
-        ),
+        NotifyReason::Failed | NotifyReason::Destroyed => {
+            (default_title.as_str(), default_body.as_str())
+        }
     };
     // v1.3.5: pick icon per reason so failed tasks show [Error] instead of [Info]
     let icon = match reason {
