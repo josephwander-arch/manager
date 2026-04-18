@@ -1,5 +1,7 @@
 # Manager MCP Server
 
+[![CI](https://github.com/josephwander-arch/manager/actions/workflows/ci.yml/badge.svg)](https://github.com/josephwander-arch/manager/actions/workflows/ci.yml)
+
 Multi-vendor AI orchestration from inside any MCP client. Manager routes
 coding, reasoning, and toolchain tasks to **Claude Code**, **OpenAI Codex**,
 **Google Gemini CLI**, or **OpenAI GPT API** — based on task shape, historical
@@ -11,100 +13,43 @@ One MCP server. Four backends. Server-side blocking. Durable coordination.
 
 ---
 
+## About
+
+CPC is developed by Joseph Wander, an independent builder exploring multi-agent AI workflows for daily professional use. It is not a funded company, not an incorporated product, and not a managed cloud service — it is a personal infrastructure project made public under Apache-2.0 so others can use, fork, or extend it.
+
+What CPC solves: coordinating multiple AI coding backends (Claude Code, GPT, Codex, Gemini) from a single MCP-aware client so reasoning and implementation happen in separate sandboxes with durable state between them.
+
+What CPC is not: it is not a replacement for Claude Desktop's native tooling, not a SaaS, and not an abstraction over vendor APIs — it is a local Rust binary that slots into any MCP client alongside whatever else you already run.
+
+---
+
 ## What's New in v1.3.8
 
 **Active Operations tap panel.** Dashboard Zone 2 now aggregates breadcrumbs from all CPC servers into a single clickable panel:
 
-- **Multi-source merge** -- reads `active.index.json` (CPC state) enriched with project JSONL step data, plus polled breadcrumbs from local and autonomous servers
-- **Server tags** -- each entry tagged `[cpc]`, `[local]`, or `[autonomous]` with color-coded badges
+- **Multi-source merge** -- reads `active.index.json` enriched with project JSONL step data, plus live breadcrumbs polled from the local MCP server
+- **Server tags** -- each entry is tagged with its source server and rendered with a color-coded badge
 - **Tap-to-expand** -- click any card to reveal the full steps list with done/current/pending indicators, per-step results, owner, and project ID
 
-See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+### Previous: v1.3.7 — Dashboard Quick-Wins
 
----
+Live step counter on task cards, cross-server last-5-tools widget, pending-exe-swap scorecard, GitHub Actions release workflow (x64 + ARM64), SECURITY.md, platform-split install docs.
 
-<details>
-<summary>Older Releases</summary>
-
-### v1.3.7 — Dashboard Quick-Wins
-
-- Live step counter, cross-server last-5-tools widget, pending-swap counter
-
-### v1.2.8 — Operational Dashboard
-
-- `GET /` serves a dark-theme single-file HTML dashboard polling all servers
-- `GET /api/status` — rich JSON endpoint with session counts, task details, loaf state
-- `GET /api/config` — port assignments and poll intervals
-- `live_status.json` writer for cross-device visibility
-- `dashboard_open`, `dashboard_stop`, `dashboard_status` MCP tools
-- Port fallback (9100–9105) with `127.0.0.1` binding
-
-### v1.2.7 — Multi-Breadcrumb Status Bar + Session Orphan Detection
-
-- `status_bar` shows count + per-project breakdown for multiple active breadcrumbs
-- Session `orphaned` status when manager restarts with live child processes
-- `license = "Apache-2.0"` metadata in Cargo.toml
-- Two-Tier Storage docs in `per_machine_setup.md`
-
-### v1.2.6 — Session Notification Hooks
-
-Five new optional parameters on `session_start`: `notify_on_complete`,
-`notify_on_fail`, `notify_on_destroy`, `notify_title`, `notify_body`. All
-default to false. Flags persist to `meta.json` and survive manager restarts.
-
-### v1.2.5 — Per-Server Learning Loop
-
-- `run_analyzer` tool — nightly task performance analyzer with promotion/demotion proposals
-
-### v1.2.3 — Cancel-Kill, Output-as-Timer, Status Bar, Fingerprint Dedup
-
-- `task_cancel` and `session_destroy` now kill the full process tree
-- Removed `wait=true` blocking and `timeout_secs` enforcement
-- `task_poll` — non-blocking completion polling with status bar
-- `status_bar` — one-line system summary
-- Fingerprint dedup with stalled-session override
-- Session heartbeat with live `alive`/`pid`/`last_activity` fields
-
-### v1.2.1 — Notify + Watchdog Fixes
-
-- `notify` tool — Windows toast notifications
-- Watchdog scope fixes for process-tree detection
-
-### v1.2.0 — Ghost-Task Fix
-
-- Tasks with live child PIDs survive manager restart instead of being force-failed
-- `child_pid` and `watchdog_observations` fields on task records
-- Named-pipe singleton architecture
-- Zombie reaper on startup
-
-### v1.1.1 — task_rerun, Health Enum, Stall Fix
-
-- `task_rerun` — re-submit completed tasks with modifications
-- `health` enum (9 values) replaces `stall_detected`
-- `active_tool_running` boolean on `task_status`
-- Stall detector threshold raised to 90s, skips mid-flight tools
-- Task lineage fields: `parent_task_id`, `forked_from`, `continuation_of`
-
-### v1.1.0 — Initial Multi-Backend Release
-
-- Multi-backend orchestration (Claude Code, Codex, Gemini, GPT)
-- Auto-route, Project Loafs, `task_run_parallel`, `task_watch`
-- Archive-first backups, `get_analytics`, session tools, workflow templates
-
-### v1.0.0 — Initial Release
-
-- Claude Code backend support, basic task lifecycle
-
-</details>
+See [CHANGELOG.md](CHANGELOG.md) for the full history (v1.0.0 through v1.3.6), or browse the [Releases page](https://github.com/josephwander-arch/manager/releases) for per-version binaries and notes.
 
 ---
 
 ## Overview
 
-Manager exists because of the **33-line rule**: if a task requires writing
-more than ~33 lines of code, delegate it. Claude's context window is for
-reasoning and orchestration. Coding agents have their own sandboxes and token
-budgets — let them write code.
+Manager exists for the **delegate-when-the-task-gets-long heuristic**: if the
+implementation needs more than a few dozen lines of code, delegate it to a
+coding agent rather than writing it inline in your main conversation. Claude's
+context window is for reasoning and orchestration; coding agents have their
+own sandboxes and token budgets — let them write code. The exact line count
+at which delegation becomes cheaper varies with task complexity and your
+per-task token budget; in practice, the threshold tends to sit somewhere in
+the 30–40-line range, which is the rule of thumb you'll see repeated in CPC
+skill files.
 
 ### Backends
 
@@ -286,9 +231,9 @@ task_watch(task_ids=["task_1", "task_2"], timeout=600)
 
 | Tool | Purpose |
 |------|---------|
-| `gemini_direct` | One-shot query to Gemini CLI, no task queue |
-| `codex_exec` | Run OpenAI Codex non-interactively with sandbox modes |
-| `codex_review` | Run OpenAI Codex code review on uncommitted changes |
+| `gemini_direct` *(beta)* | One-shot query to Gemini CLI, no task queue |
+| `codex_exec` *(beta)* | Run OpenAI Codex non-interactively with sandbox modes |
+| `codex_review` *(beta)* | Run OpenAI Codex code review on uncommitted changes |
 | `open_terminal` | Open Claude Code in a visible terminal window |
 
 ### Project Loaf Tools
@@ -364,39 +309,41 @@ Each CLI must be authenticated in a real interactive terminal *before* manager's
 
 ## Compatible With
 
-Works with any MCP client. Common install channels:
+Manager works standalone — pair it with other CPC MCP servers when you want a larger toolkit. Manager handles delegation and coordination; the other servers handle the tools you're delegating over.
 
-- **Claude Desktop** (the main chat app) — add to `claude_desktop_config.json`. See `claude_desktop_config.example.json` in this repo.
-- **Claude Code** — add to `~/.claude/mcp.json`, or point your `CLAUDE.md` at `skills/manager.md` to load it as a skill instead.
-- **OpenAI Codex CLI** — register via Codex's MCP config, or load the skill directly.
-- **Gemini CLI** — register via Gemini's MCP config, or load the skill directly.
+- Pair with [local](https://github.com/josephwander-arch/local) for filesystem, shell, and persistent-session tools on Windows.
+- Pair with [hands](https://github.com/josephwander-arch/hands) when delegated tasks need browser or native-UI automation.
+- Pair with [workflow](https://github.com/josephwander-arch/workflow) when delegated tasks hit stored APIs that you've already graduated from browser to HTTP.
 
-**Two install layouts:**
+Manager itself runs in any MCP client: Claude Desktop, Claude Code (`~/.claude/mcp.json`), OpenAI Codex CLI, Gemini CLI, or any other MCP-compatible host. A client-specific example config (`claude_desktop_config.example.json`) ships in this repo. If your client supports Anthropic skill files, you can also load `skills/manager.md` directly for skill-only (no-server) use — handy for planning or read-only review flows.
 
-1. **Local folder** — clone or download this repo, then point your client at the local directory or the extracted `.exe` binary.
-2. **Installed binary** — grab the `.exe` from the [Releases](https://github.com/josephwander-arch/manager/releases) page, place it wherever you keep your MCP binaries, then register its path in your client's config.
+### First-run tip for Claude clients
 
-**Also ships as a skill** — if your client supports Anthropic skill files, load `skills/manager.md` directly. Skill-only mode gives you the behavioral guidance without running the server; useful for planning, review, or read-only workflows.
+If you're running manager inside Claude Desktop or Claude Code, enable **tools always loaded** in that client's tool settings before your first call. Manager exposes a wide tool surface; clients that lazy-load tools sometimes fail to discover the full set on the first invocation. Turning on always-loaded is a one-time toggle that eliminates this class of first-run friction entirely.
 
-### First-run tip: enable "always-loaded tools"
+### Bootstrap the rest of the stack via manager itself
 
-For the smoothest experience, enable **tools always loaded** in your Claude client settings (Claude Desktop: Settings → Tools, or equivalent in Claude Code / Codex / Gemini). This ensures Claude recognizes the tool surface on first use without needing to re-discover it every session. Most users hit friction on day one because this is off by default.
+Manager's own `task_submit` is a clean way to install its sibling servers. Once manager is running, delegate a Claude Code task:
 
-### Bootstrap the rest of the toolkit *(optional convenience)*
+> `task_submit with backend claude_code: install hands, local, and workflow from github.com/josephwander-arch/, register them in Claude Desktop config, and verify each one started cleanly.`
 
-`manager` is not a required install path — each of the other four MCP servers can be installed directly using the steps in Compatible With above. But if you already have `manager` running, you can skip the manual work for the rest.
-
-Once `manager` is running, you can delegate the remaining four installs to a fresh Claude Code session. Ask Claude:
-
-> `task_submit with backend claude_code: install hands, local, echo, and workflow from github.com/josephwander-arch/, register them in Claude Desktop config, and verify each one started cleanly.`
-
-The delegated session handles download, placement, and config updates in its own context — you monitor via `task_status` and pick up the results when it reports `health: done`. Good for users who already have Claude Code installed and want the full stack without manual steps.
+The delegated session downloads each binary, places it, edits the config, and verifies startup in its own sandbox. You monitor via `task_status` and collect the result when it reports `health: done`. Manual installs work just as well — use whichever is faster for your setup.
 
 ## Requirements
 
 - Windows 10/11 (x64 or ARM64)
 - At least one backend CLI installed and authenticated (Claude Code, Codex, Gemini, or GPT)
 - Rust stable toolchain (build from source only)
+
+## Failure modes
+
+Manager's orchestration surface has a few predictable failure shapes. Knowing them up front makes debugging faster:
+
+- **Backend CLI not authenticated** — `task_submit` returns quickly (~10s) with `health: auth_error`. Fix: run the backend CLI manually (`claude`, `codex`, `gemini`) and re-authenticate, then retry.
+- **Backend CLI not on PATH** — dispatch fails with `health: backend_missing`. Fix: install the CLI and confirm `where <cli>` resolves before retrying.
+- **Long-running task silent** — status stays at `running` past your expected window. Check `task_status` first, then inspect `C:\CPC\tasks\<task_id>\transcript.jsonl` for the raw backend output.
+- **Breadcrumb orphaned by crashed session** — shows up in `breadcrumb_list` with no recent activity. Use `breadcrumb_adopt` to take it over or `breadcrumb_abort` to close it out.
+- **Dashboard stuck on stale state** — refresh the browser; dashboard is view-only and recovers on reload.
 
 ## Contributing
 
@@ -405,14 +352,6 @@ Issues welcome; PRs considered but this is primarily maintained as part of the C
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
-
----
-
-## Donations
-
-If this project saves you time, consider supporting development:
-
-**$NeverRemember** (Cash App)
 
 ---
 

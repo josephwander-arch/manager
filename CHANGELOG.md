@@ -8,14 +8,14 @@ All notable changes to the Manager MCP Server are documented here.
 
 ### Added
 
-- **Active Operations tap panel** -- Dashboard Zone 2 ("Active Operations") now aggregates breadcrumbs from all CPC servers via `active.index.json`, enriched with step details from project JSONL files. Each entry shows a server tag (`[cpc]`, `[local]`, `[autonomous]`), progress bar, elapsed time, and owner. Click/tap any card to expand the full steps list with per-step status (done/current/pending). Deduplicates across sources and falls back to polled server data when available.
+- **Active Operations tap panel** -- Dashboard Zone 2 ("Active Operations") now aggregates breadcrumbs from all CPC servers via `active.index.json`, enriched with step details from project JSONL files. Each entry shows a source-server tag, progress bar, elapsed time, and owner. Click/tap any card to expand the full steps list with per-step status (done/current/pending). Deduplicates across sources and falls back to polled server data when available.
 
 ## [1.3.7] - 2026-04-17
 
 ### Added
 
 - **Live step counter** -- Task cards now show a `[N/M]` tool-step counter parsed from each task's `steps[]` array, replacing the static progress bar for tasks without `[STEP n/N]` output markers. Updates on every dashboard poll tick.
-- **Cross-server last-5-tools widget** -- Bottom strip Zone 4 now merges manager's ring buffer with a log-tailed `mcp_activity.jsonl` (autonomous entries) plus polled `recent_tool_calls` from all other servers. Shows newest 5 entries in `HH:MM:SS | server | tool_name` format. Purely read-only log tailing, zero latency impact on tool calls.
+- **Cross-server last-5-tools widget** -- Bottom strip Zone 4 now merges manager's ring buffer with log-tailed `mcp_activity.jsonl` entries plus polled `recent_tool_calls` from all other servers. Shows newest 5 entries in `HH:MM:SS | server | tool_name` format. Purely read-only log tailing, zero latency impact on tool calls.
 - **Pending-exe-swap counter** -- Scorecard widget counts `.new` files in the servers directory. Shows "Pending Swaps: N" so you know how many deploy swaps are waiting.
 - **GitHub Actions release workflow** -- `v*` tag push builds x64 (windows-latest) + ARM64 (windows-11-arm native) binaries, attaches to draft release as `manager-vX.Y.Z-x64.exe` / `manager-vX.Y.Z-aarch64.exe`.
 - **SECURITY.md** -- security policy and reporting instructions.
@@ -45,7 +45,7 @@ All notable changes to the Manager MCP Server are documented here.
 
 ### Changed
 
-- **Dashboard default port moved from 9100 to 9200** — Other MCP servers (local=9101, hands=9102, workflow=9103, autonomous=9104) were stealing ports 9101-9104, causing manager to fall through to 9105 and confusing dashboard bookmarks. 9200 is clean and manager-dedicated. `CPC_DASHBOARD_PORT` and `CPC_MANAGER_PORT` env vars still override.
+- **Dashboard default port moved from 9100 to 9200** — Other MCP servers (local=9101, hands=9102, workflow=9103, and other CPC servers on 9104) were stealing ports 9101-9104, causing manager to fall through to 9105 and confusing dashboard bookmarks. 9200 is clean and manager-dedicated. `CPC_DASHBOARD_PORT` and `CPC_MANAGER_PORT` env vars still override.
 - **Dashboard: "Active Breadcrumb" widget renamed to "Active Breadcrumbs"** — The widget already iterated over all active breadcrumbs (via `.map(b => ...)`), but the singular label made it look like a single-item widget. Also added explicit newest-first sort by `started_at`/`created_at`.
 
 ### Fixed
@@ -78,7 +78,7 @@ All notable changes to the Manager MCP Server are documented here.
 
 ### Changed
 
-- **Backend-aware delegation prompt injection** — The CPC delegation context prepended to every task now adapts per backend. Claude Code tasks receive a shorter directive referencing TodoWrite (native) and explicit autonomous breadcrumb calls, since Claude Code's native TodoWrite tool already tracks per-step progress. Other backends (GPT, Gemini, Codex) continue to receive the original full directive. Net effect: ~3-7% faster Claude Code task execution with no loss of downstream report quality or CPC breadcrumb coordination.
+- **Backend-aware delegation prompt injection** — The CPC delegation context prepended to every task now adapts per backend. Claude Code tasks receive a shorter directive referencing TodoWrite (native) and explicit CPC breadcrumb calls, since Claude Code's native TodoWrite tool already tracks per-step progress. Other backends (GPT, Gemini, Codex) continue to receive the original full directive. Net effect: ~3-7% faster Claude Code task execution with no loss of downstream report quality or CPC breadcrumb coordination.
 
 ## [1.3.0] - 2026-04-16
 
@@ -108,7 +108,7 @@ All notable changes to the Manager MCP Server are documented here.
 
 ### Added
 
-- **CPC Operational Dashboard** — `GET /` serves a dark-theme single-file HTML dashboard. Polls all 5 CPC servers (manager:9100, local:9101, hands:9102, workflow:9103, autonomous:9104) at configurable intervals (5s fast, 42s slow). Features: health strip, session/task cards with live elapsed timers, breadcrumb progress bars, today's scorecard, per-server service panels, quick action bar.
+- **CPC Operational Dashboard** — `GET /` serves a dark-theme single-file HTML dashboard. Polls all CPC servers (manager:9100, local:9101, hands:9102, workflow:9103, plus any additional CPC servers on the 9100-series) at configurable intervals (5s fast, 42s slow). Features: health strip, session/task cards with live elapsed timers, breadcrumb progress bars, today's scorecard, per-server service panels, quick action bar.
 
 - **`GET /api/status`** — rich JSON endpoint: session counts (running/queued/done/failed/orphaned), last 20 task details, active loaf, `status_bar` output, version. Used by the dashboard frontend and `live_status.json` writer.
 
@@ -137,7 +137,7 @@ All notable changes to the Manager MCP Server are documented here.
 
 ### Added
 
-- **`status_bar` multi-breadcrumb format.** When multiple breadcrumbs are active, `status_bar` now shows count + per-project breakdown: `"3 active (batch1: 2, other: 1)"`. Single breadcrumb keeps existing `"active:<name>"` format. Reads from `C:\CPC\state\breadcrumbs\active.index.json` (written by local/autonomous servers); falls back through legacy `active_operation.json` → autonomous JSONL for older installs.
+- **`status_bar` multi-breadcrumb format.** When multiple breadcrumbs are active, `status_bar` now shows count + per-project breakdown: `"3 active (batch1: 2, other: 1)"`. Single breadcrumb keeps existing `"active:<name>"` format. Reads from `C:\CPC\state\breadcrumbs\active.index.json` (written by CPC's MCP servers); falls back through legacy `active_operation.json` → legacy JSONL for older installs.
 
 - **Session `orphaned` status.** When manager restarts and finds a session whose child process is still alive (pipes lost on restart), it now marks the session `orphaned` instead of keeping it `running`. `session_list` surfaces `"orphaned": true` for these entries. Orphaned sessions can be destroyed and restarted to recover.
 
@@ -191,7 +191,7 @@ All notable changes to the Manager MCP Server are documented here.
 
 ### Fixed
 
-- **status_bar and Gemini breadcrumb injection now prefer local server's breadcrumb state** at `%LOCALAPPDATA%\CPC\state\active_operation.json`, falling back to autonomous paths only if the local state directory doesn't exist. Fixes `"bc: unavailable"` for public distribution users running manager + local without autonomous installed. Priority: local → autonomous → unavailable.
+- **status_bar and Gemini breadcrumb injection now prefer local server's breadcrumb state** at `%LOCALAPPDATA%\CPC\state\active_operation.json`, falling back to legacy paths only if the local state directory doesn't exist. Fixes `"bc: unavailable"` for public distribution users running manager + local without additional CPC servers installed. Priority: local → legacy → unavailable.
 
 ## [1.2.3] - 2026-04-14
 
@@ -205,7 +205,7 @@ All notable changes to the Manager MCP Server are documented here.
 
 - **`task_poll` tool.** Returns `{ completed_since: [...], still_running: [...], status_bar: {...} }`. `since` parameter defaults to 1 hour ago. Replaces the `wait=true` polling pattern with an explicit, non-blocking poll.
 
-- **`status_bar` tool.** One-line system summary: `{ manager: "N running, M queued, K unclaimed", breadcrumb: "...", loaf: "...", formatted: "one-line string" }`. Queries autonomous breadcrumb JSONL and active Project Loaf. Returns `"unavailable"` for unreachable sources — never errors.
+- **`status_bar` tool.** One-line system summary: `{ manager: "N running, M queued, K unclaimed", breadcrumb: "...", loaf: "...", formatted: "one-line string" }`. Queries the CPC breadcrumb JSONL and active Project Loaf. Returns `"unavailable"` for unreachable sources — never errors.
 
 - **Fingerprint dedup with stalled override.** Before queuing, computes `fingerprint = hash(backend, prompt[:200], working_dir)`. If an active task matches: reject with `{ status: "duplicate", existing_task_id }` when last activity was within 120s. If match has no activity for 120s+, allow the new submission and mark the old task `superseded_by: <new_id>` (flagged for reap). New params: `allow_duplicate: bool` on `task_submit`, `include_stalled: bool` on `task_list`. New task fields: `fingerprint`, `superseded_by`.
 
