@@ -7,6 +7,8 @@ success rates, and explicit user choice.
 
 One MCP server. Four backends. Server-side blocking. Durable coordination.
 
+**Part of [CPC](https://github.com/josephwander-arch) (Cognitive Performance Computing)** — a multi-agent AI orchestration platform. Related repos: [local](https://github.com/josephwander-arch/local) · [hands](https://github.com/josephwander-arch/hands) · [workflow](https://github.com/josephwander-arch/workflow) · [cpc-paths](https://github.com/josephwander-arch/cpc-paths) · [cpc-breadcrumbs](https://github.com/josephwander-arch/cpc-breadcrumbs)
+
 ---
 
 ## What's New in v1.3.0
@@ -197,6 +199,16 @@ Grab the latest binary from the [v1.3.0 release](https://github.com/josephwander
 - `manager_v1.3.0_windows_arm64.exe` — Windows ARM64
 
 Place the `.exe` in your MCP server directory and register its path in your client config.
+
+### Build from Source
+
+```bash
+git clone https://github.com/josephwander-arch/manager.git
+cd manager
+cargo build --release
+```
+
+Binary appears at `target/release/manager.exe`. Requires Rust stable toolchain — nightly is not required.
 
 ### Verify Installation
 
@@ -415,6 +427,16 @@ Once `manager` is running, you can delegate the remaining four installs to a fre
 > `task_submit with backend claude_code: install hands, local, echo, and workflow from github.com/josephwander-arch/, register them in Claude Desktop config, and verify each one started cleanly.`
 
 The delegated session handles download, placement, and config updates in its own context — you monitor via `task_status` and pick up the results when it reports `health: done`. Good for users who already have Claude Code installed and want the full stack without manual steps.
+
+## Requirements
+
+- Windows 10/11 (x64 or ARM64)
+- At least one backend CLI installed and authenticated (Claude Code, Codex, Gemini, or GPT)
+- Rust stable toolchain (build from source only)
+
+## Contributing
+
+Issues welcome; PRs considered but this is primarily maintained as part of the CPC stack.
 
 ## License
 
