@@ -11,43 +11,11 @@ One MCP server. Four backends. Server-side blocking. Durable coordination.
 
 ---
 
-## What's New in v1.3.5
+## What's New in v1.3.6
 
-**StdinMode v2, stall watchdog, and Dashboard v1.3.**
-
-### StdinMode v2 — Stdin Handling Fix
-
-New `StdinMode` enum (`Null` / `Piped`) controls child process stdin. One-shot
-tasks get `Stdio::null()` (immediate EOF), sessions get `Stdio::piped()` for
-`send()` follow-ups. Resolves stdin reader block that caused task startup stalls
-on Windows when multiple backends competed for stdio.
-
-Reader cleanup hardened: sequential `child.wait()` then 5-second timeout on
-reader drain prevents indefinite hang on Windows pipe close.
-
-### Stall Watchdog
-
-`TaskStatus::Stalled` state for tasks with no output for
-`MANAGER_STALL_TIMEOUT_SECS`. Transitions back to `Running` automatically if
-output resumes. Surfaced in `task_poll` and dashboard.
-
-### Dashboard v1.3
-
-- **Breadcrumb progress bar** — visual step tracking in the dashboard
-- **Voice health dot** — at-a-glance server status indicator
-- **Click-to-detail panel** — click any session/task card to see full prompt and output
-- **2 Hz render cap** — smooth, efficient DOM updates
-- **pollServer guard** — prevents runaway polling for unconfigured servers
-
-### New Task Fields
-
-| Field | Description |
-|-------|-------------|
-| `live_activity` | Per-task process tree snapshot (pid, name, cmd_preview, cpu_percent) |
-| `recent_tool_calls` | Last 50 tool calls with timestamps and duration (credentials redacted) |
-| `label` | Optional human-readable label for tasks, shown in dashboard and `task_list` |
-| `current_step` / `total_steps` / `current_step_desc` | Step progress tracking |
-| `effort` | Optional effort estimate on task submission |
+**Clippy cleanup release.** Removed blanket `#![allow(clippy::all)]` from crate root.
+Targeted fixes across `main.rs` and `analyzer.rs` -- `sort_by` to `sort_by_key` rewrites
+for Rust 1.95+ compatibility, plus additional lint fixes throughout.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 

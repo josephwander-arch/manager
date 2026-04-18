@@ -2,6 +2,12 @@
 
 All notable changes to the Manager MCP Server are documented here.
 
+## [1.3.6] - 2026-04-17
+
+### Changed
+
+- **Clippy cleanup** — removed blanket `#![allow(clippy::all)]` suppression from crate root. Replaced with targeted fixes across `main.rs` and `analyzer.rs`: `sort_by` closures rewritten to `sort_by_key` for Rust 1.95+ compatibility, plus additional lint-targeted fixes throughout.
+
 ## [1.3.5] - 2026-04-17
 
 ### Fixed
