@@ -30,7 +30,7 @@ keywords:
 
 # Manager MCP Server: Getting Started Guide
 
-Manager is a Rust MCP server that acts as a multi-AI orchestrator, routing tasks across Claude Code, Codex, Gemini CLI, and GPT through a single unified interface. It exposes 60+ tools over JSON-RPC (stdin/stdout) and handles task routing, parallel AI execution, workflow automation, and execution analytics. If you need AI agent delegation across multiple backends from Claude Desktop or Claude Code, Manager is the MCP tool server that ties them together.
+Manager is a Rust MCP server that acts as a multi-AI orchestrator, routing tasks across Claude Code, Codex, Gemini CLI, and GPT through a single unified interface. It exposes 48 tools over JSON-RPC (stdin/stdout) and handles task routing, parallel AI execution, workflow automation, and execution analytics. If you need AI agent delegation across multiple backends from Claude Desktop or Claude Code, Manager is the MCP tool server that ties them together.
 
 ## What Manager Does
 

@@ -1,6 +1,6 @@
 ---
 name: manager-getting-started
-description: 'Getting started with Manager — the 44-tool multi-AI orchestrator. Use when: delegating code tasks to Claude Code/Codex/Gemini, running parallel AI executions, creating workflow templates, or routing tasks across AI backends.'
+description: 'Getting started with Manager — the 48-tool multi-AI orchestrator. Use when: delegating code tasks to Claude Code/Codex/Gemini, running parallel AI executions, creating workflow templates, or routing tasks across AI backends.'
 ---
 
 ## What Manager Is
