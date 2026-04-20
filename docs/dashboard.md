@@ -134,7 +134,7 @@ manager release that ships a new embedded dashboard):
 ```powershell
 $embedded = Join-Path (Split-Path (Get-Command manager -ErrorAction SilentlyContinue).Source -Parent) "..\src\dashboard_ui.html"
 # Or, if building from source:
-$embedded = "C:\rust-mcp\manager-mcp\src\dashboard_ui.html"
+$embedded = "<manager-source>\src\dashboard_ui.html"
 Copy-Item $embedded C:\CPC\dashboard\dashboard.html -Force
 ```
 

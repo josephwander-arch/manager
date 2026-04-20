@@ -23,19 +23,17 @@ What CPC is not: it is not a replacement for Claude Desktop's native tooling, no
 
 ---
 
-## What's New in v1.3.8
+## What's New in v1.4.0
 
-**Active Operations tap panel.** Dashboard Zone 2 now aggregates breadcrumbs from all CPC servers into a single clickable panel:
+**Zod envelope fix + dashboard port retry.** v1.4.0 fixes the Zod validation envelope for structured task output and adds port-retry logic to the dashboard HTTP endpoint so it survives port conflicts on startup.
 
-- **Multi-source merge** -- reads `active.index.json` enriched with project JSONL step data, plus live breadcrumbs polled from the local MCP server
-- **Server tags** -- each entry is tagged with its source server and rendered with a color-coded badge
-- **Tap-to-expand** -- click any card to reveal the full steps list with done/current/pending indicators, per-step results, owner, and project ID
+### Previous: v1.3.9 — Codex separator, embedded-only dashboard, archive_today_count, em-dash sentinel
 
-### Previous: v1.3.7 — Dashboard Quick-Wins
+### Previous: v1.3.8 — Active Operations tap panel
 
-Live step counter on task cards, cross-server last-5-tools widget, pending-exe-swap scorecard, GitHub Actions release workflow (x64 + ARM64), SECURITY.md, platform-split install docs.
+Dashboard Zone 2 aggregates breadcrumbs from all CPC servers into a single clickable panel with multi-source merge, server tags, and tap-to-expand.
 
-See [CHANGELOG.md](CHANGELOG.md) for the full history (v1.0.0 through v1.3.6), or browse the [Releases page](https://github.com/josephwander-arch/manager/releases) for per-version binaries and notes.
+See [CHANGELOG.md](CHANGELOG.md) for the full history (v1.0.0 through v1.3.8), or browse the [Releases page](https://github.com/josephwander-arch/manager/releases) for per-version binaries and notes.
 
 ---
 
@@ -75,7 +73,7 @@ skill files.
 
 ### Windows x64
 
-1. Download `manager-v1.3.8-x64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
+1. Download `manager-v1.4.0-x64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
 2. Rename to `manager.exe` and place in `%LOCALAPPDATA%\CPC\servers\`.
 3. Add to your `claude_desktop_config.json`:
    ```json
@@ -93,7 +91,7 @@ skill files.
 
 ### Windows ARM64
 
-1. Download `manager-v1.3.8-aarch64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
+1. Download `manager-v1.4.0-aarch64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
 2. Rename to `manager.exe` and place in `%LOCALAPPDATA%\CPC\servers\`.
 3. Add to your `claude_desktop_config.json`:
    ```json
