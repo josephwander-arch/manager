@@ -4,6 +4,17 @@ All notable changes to the Manager MCP Server are documented here.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-04-20
+
+### Fixed
+
+- **JSON-RPC notification envelope** — Notifications (`notifications/cancelled`, `notifications/progress`, `notifications/roots/list_changed`, etc.) no longer receive stray success responses. Previously, only `notifications/initialized` was explicitly handled; all other notification methods fell through to the catch-all arm which returned a `JsonRpcSuccess` with `id: null`. JSON-RPC 2.0 spec requires that notifications MUST NOT receive responses. Claude Desktop's Zod validator rejected these stray responses, producing recurring "Invalid response" toasts. Fix: all `notifications/*` methods now `continue` without responding, plus a belt-and-suspenders guard skips any response where `id` is null.
+- **Dashboard port bind retry** — Retry range expanded from 6 ports (preferred..preferred+5) to 100 ports (preferred..preferred+99), with random jitter on the starting offset to avoid collisions when multiple manager instances start concurrently. Makes the dashboard immune to leaked sockets from crashed previous instances. On exhaustion, logs at ERROR level with a `CPC_DASHBOARD_PORT` env var override hint instead of silently returning.
+
+### Changed
+
+- **Upgrade notes** — Existing installs can run the latest installer again or manually swap `manager.exe` from the GitHub release.
+
 ## [1.3.9] - 2026-04-19
 
 ### Fixed

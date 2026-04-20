@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 mod analyzer;
@@ -8864,28 +8864,39 @@ async fn start_dashboard(state: DashboardState) {
         .layer(cors)
         .with_state(state);
 
-    // Try preferred port, then fallback range preferred+1 .. preferred+5
-    let mut bound_port = preferred;
+    // Try preferred port with random jitter, then walk forward through a 100-port range.
+    // Jitter avoids collisions when multiple manager instances start concurrently.
+    let jitter: u16 = rand::random::<u16>() % 20;
+    let range_size: u16 = 100;
+    let mut attempts: u16 = 0;
+    let mut bound_port = preferred + jitter;
     let listener = loop {
         match tokio::net::TcpListener::bind(format!("127.0.0.1:{}", bound_port)).await {
             Ok(l) => break l,
             Err(e) => {
-                if bound_port < preferred + 5 {
-                    warn!(
-                        "Dashboard port {} busy: {} — trying {}",
-                        bound_port,
-                        e,
-                        bound_port + 1
-                    );
-                    bound_port += 1;
-                } else {
-                    warn!(
-                        "Dashboard failed to bind ports {}–{}: {}",
+                attempts += 1;
+                if attempts >= range_size {
+                    error!(
+                        "Dashboard failed to bind any port in range {}–{} after {} attempts: {}. \
+                         Set CPC_DASHBOARD_PORT env var to override.",
                         preferred,
-                        preferred + 5,
+                        preferred + range_size - 1,
+                        attempts,
                         e
                     );
                     return;
+                }
+                let failed_port = bound_port;
+                bound_port = if bound_port >= preferred + range_size - 1 {
+                    preferred
+                } else {
+                    bound_port + 1
+                };
+                if attempts <= 3 {
+                    warn!(
+                        "Dashboard port {} busy: {} — trying {}",
+                        failed_port, e, bound_port
+                    );
                 }
             }
         }
@@ -9149,7 +9160,8 @@ fn start_pipe_server(
                                 "capabilities": {"tools": {}}
                             }
                         }),
-                        "notifications/initialized" => continue,
+                        // JSON-RPC 2.0: notifications MUST NOT receive responses
+                        method if method.starts_with("notifications/") => continue,
                         "tools/list" => json!({
                             "jsonrpc": "2.0", "id": request.id,
                             "result": get_tools_list()
@@ -9176,6 +9188,8 @@ fn start_pipe_server(
                                 }),
                             }
                         }
+                        // Safety net: null id means notification — never respond
+                        _ if request.id.is_null() => continue,
                         _ => json!({"jsonrpc": "2.0", "id": request.id, "result": {}}),
                     };
 
@@ -9336,7 +9350,8 @@ fn main() {
                     "capabilities": {"tools": {}}
                 }),
             },
-            "notifications/initialized" => continue,
+            // JSON-RPC 2.0: notifications MUST NOT receive responses
+            method if method.starts_with("notifications/") => continue,
             "tools/list" => JsonRpcSuccess {
                 jsonrpc: "2.0".to_string(),
                 id: request.id,
@@ -9388,6 +9403,8 @@ fn main() {
                     },
                 }
             }
+            // Safety net: null id means notification — never respond
+            _ if request.id.is_null() => continue,
             _ => JsonRpcSuccess {
                 jsonrpc: "2.0".to_string(),
                 id: request.id,
