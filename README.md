@@ -9,6 +9,8 @@ success rates, and explicit user choice.
 
 One MCP server. Four backends. Server-side blocking. Durable coordination.
 
+**48 MCP tools** across task orchestration, session management, loafs, templates, analytics, dashboard, and multi-backend coordination.
+
 **Part of [CPC](https://github.com/josephwander-arch) (Cognitive Performance Computing)** — a multi-agent AI orchestration platform. Related repos: [local](https://github.com/josephwander-arch/local) · [hands](https://github.com/josephwander-arch/hands) · [workflow](https://github.com/josephwander-arch/workflow) · [cpc-paths](https://github.com/josephwander-arch/cpc-paths) · [cpc-breadcrumbs](https://github.com/josephwander-arch/cpc-breadcrumbs)
 
 ---
