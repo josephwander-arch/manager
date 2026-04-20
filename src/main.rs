@@ -1,5 +1,5 @@
 #![recursion_limit = "512"]
-//! Manager MCP Server v1.0
+//! Manager MCP Server v1.4.1
 //! Multi-AI orchestrator: GPT (reasoning), Gemini CLI (coding), Claude Code (coding)
 //! Submit → Poll → Retrieve pattern for long-running tasks
 //!
@@ -20,6 +20,16 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 mod analyzer;
+
+/// Resolve user home directory from USERPROFILE env var.
+fn default_user_home() -> String {
+    std::env::var("USERPROFILE").unwrap_or_else(|_| r"C:\Users\Default".to_string())
+}
+
+/// Resolve CPC workspace root from CPC_WORKSPACE_ROOT env var.
+fn workspace_root() -> String {
+    std::env::var("CPC_WORKSPACE_ROOT").unwrap_or_else(|_| r"C:\rust-mcp".to_string())
+}
 
 /// Controls whether a spawned CLI task gets piped stdin (for send() follow-ups)
 /// or null stdin (immediate EOF — prevents claude_code stdin reader stalls).
@@ -779,7 +789,7 @@ impl Server {
             config: Arc::new(RwLock::new(ServerConfig {
                 openai_api_key: openai_key,
                 default_gpt_model: DEFAULT_GPT_MODEL.to_string(),
-                default_working_dir: r"C:\Users\josep".to_string(),
+                default_working_dir: default_user_home(),
             })),
             runtime,
             stdout: Arc::new(Mutex::new(io::stdout())),
@@ -1017,8 +1027,8 @@ impl Server {
                 if let Some(cap) = re.captures(&task.prompt) {
                     if let Some(pkg) = cap.get(1) {
                         assertions.push(format!(
-                            r"file_exists:C:\rust-mcp\target\release\{}.exe",
-                            pkg.as_str()
+                            r"file_exists:{}\target\release\{}.exe",
+                            workspace_root(), pkg.as_str()
                         ));
                     }
                 }
@@ -1566,7 +1576,7 @@ fn spawn_retry_execution(
     let wd = retry_task
         .working_dir
         .clone()
-        .unwrap_or_else(|| r"C:\Users\josep".to_string());
+        .unwrap_or_else(|| default_user_home());
     let model = retry_task.model.clone();
 
     match retry_task.backend {
@@ -1588,11 +1598,11 @@ fn spawn_retry_execution(
                 "--add-dir".to_string(),
                 r"C:\temp".to_string(),
                 "--add-dir".to_string(),
-                r"C:\My Drive\Volumes".to_string(),
+                volumes_dir(),
                 "--add-dir".to_string(),
                 r"C:\CPC".to_string(),
                 "--add-dir".to_string(),
-                r"C:\rust-mcp".to_string(),
+                workspace_root(),
                 "--add-dir".to_string(),
                 wd,
             ];
@@ -2111,7 +2121,7 @@ async fn run_cli_task(
         store
             .get(&task_id)
             .and_then(|t| t.working_dir.clone())
-            .unwrap_or_else(|| r"C:\Users\josep".to_string())
+            .unwrap_or_else(|| default_user_home())
     };
 
     // Spawn process — .cmd files need cmd /C on Windows
@@ -3082,11 +3092,11 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
                 "--add-dir".to_string(),
                 r"C:\temp".to_string(),
                 "--add-dir".to_string(),
-                r"C:\My Drive\Volumes".to_string(),
+                volumes_dir(),
                 "--add-dir".to_string(),
                 r"C:\CPC".to_string(),
                 "--add-dir".to_string(),
-                r"C:\rust-mcp".to_string(),
+                workspace_root(),
             ];
             if let Some(m) = model {
                 args.push("--model".to_string());
@@ -3110,7 +3120,8 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
             }
         }
         Backend::Codex => {
-            let wd = working_dir.as_deref().unwrap_or(r"C:\rust-mcp");
+            let ws = workspace_root();
+            let wd = working_dir.as_deref().unwrap_or(&ws);
             let args = vec![
                 "exec".into(),
                 "--json".into(),
@@ -3141,7 +3152,8 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
             } else {
                 title
             };
-            let wd = working_dir.as_deref().unwrap_or(r"C:\rust-mcp");
+            let ws = workspace_root();
+            let wd = working_dir.as_deref().unwrap_or(&ws);
             spawn_visible_terminal(&title, &exe, &vis_args, wd);
         }
     }
@@ -4275,7 +4287,8 @@ fn handle_run_workflow(_server: &Server, args: Value) -> Result<Value, String> {
         let step = &steps[current_step_idx];
         let max_retries = step.max_retries.unwrap_or(2);
         let timeout_secs = step.timeout_secs.unwrap_or(300);
-        let working_dir = step.working_dir.as_deref().unwrap_or(r"C:\Users\josep");
+        let home = default_user_home();
+        let working_dir = step.working_dir.as_deref().unwrap_or(&home);
 
         // Replace {{previous_output}} in prompt
         let prompt = step.prompt.replace("{{previous_output}}", &previous_output);
@@ -4415,8 +4428,8 @@ fn handle_run_workflow(_server: &Server, args: Value) -> Result<Value, String> {
 
     // Log to inbox if requested
     if log_results {
-        let inbox_path = r"C:\My Drive\Volumes\multi_ai_coordination\inbox.md";
-        if let Ok(mut content) = std::fs::read_to_string(inbox_path) {
+        let inbox_path = volumes_base_path().join("multi_ai_coordination").join("inbox.md");
+        if let Ok(mut content) = std::fs::read_to_string(&inbox_path) {
             let entry = format!(
                 "\n### [{date}] Workflow '{name}' completed\n**Source:** Manager MCP\n**For:** All backends\n**Detail:** {done}/{total} steps completed successfully.\n",
                 date = Utc::now().format("%Y-%m-%d %H:%M"),
@@ -4425,7 +4438,7 @@ fn handle_run_workflow(_server: &Server, args: Value) -> Result<Value, String> {
                 total = steps.len()
             );
             content.push_str(&entry);
-            let _ = std::fs::write(inbox_path, content);
+            let _ = std::fs::write(&inbox_path, content);
         }
     }
 
@@ -4830,7 +4843,8 @@ fn launch_step(
             p
         };
 
-        let working_dir = step.working_dir.as_deref().unwrap_or(r"C:\Users\josep");
+        let home = default_user_home();
+        let working_dir = step.working_dir.as_deref().unwrap_or(&home);
         let timeout_secs = step.timeout_secs.unwrap_or(300);
         let max_retries = step.max_retries.unwrap_or(2);
 
@@ -5186,7 +5200,7 @@ fn handle_run_template(server: &Server, args: Value) -> Result<Value, String> {
                 .and_then(|v| v.as_str())
                 .map(String::from)
         })
-        .unwrap_or_else(|| r"C:\rust-mcp".to_string());
+        .unwrap_or_else(|| workspace_root());
     let submit_args = json!({ "prompt": combined, "backend": backend, "working_dir": wd });
     let result = handle_submit_task(server, submit_args)?;
 
@@ -5939,10 +5953,11 @@ fn handle_get_analytics(server: &Server, args: Value) -> Result<Value, String> {
 // ============================================================================
 
 fn handle_run_analyzer(args: Value) -> Result<Value, String> {
+    let vd = volumes_dir();
     let volumes = args
         .get("volumes_path")
         .and_then(|v| v.as_str())
-        .unwrap_or(r"C:\My Drive\Volumes")
+        .unwrap_or(&vd)
         .to_string();
     let history = args
         .get("history_path")
@@ -6021,7 +6036,7 @@ struct CustomRole {
 
 fn custom_roles_dir() -> std::path::PathBuf {
     let volumes =
-        std::env::var("VOLUMES_PATH").unwrap_or_else(|_| r"C:\My Drive\Volumes".to_string());
+        volumes_dir();
     std::path::PathBuf::from(volumes)
         .join("scripts")
         .join("roles")
@@ -6146,7 +6161,7 @@ fn save_task_artifact(task: &Task) {
     }
 
     let volumes_path =
-        std::env::var("VOLUMES_PATH").unwrap_or_else(|_| r"C:\My Drive\Volumes".to_string());
+        volumes_dir();
     let artifacts_dir = std::path::Path::new(&volumes_path).join("artifacts");
     if std::fs::create_dir_all(&artifacts_dir).is_err() {
         return;
@@ -6641,11 +6656,11 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
                 "--add-dir".to_string(),
                 r"C:\temp".to_string(),
                 "--add-dir".to_string(),
-                r"C:\My Drive\Volumes".to_string(),
+                volumes_dir(),
                 "--add-dir".to_string(),
                 r"C:\CPC".to_string(),
                 "--add-dir".to_string(),
-                r"C:\rust-mcp".to_string(),
+                workspace_root(),
             ];
             if let Some(m) = model_for_spawn {
                 args.push("--model".to_string());
@@ -6685,7 +6700,7 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
             ));
         }
         Backend::Codex => {
-            let wd = original_working_dir.unwrap_or_else(|| r"C:\rust-mcp".to_string());
+            let wd = original_working_dir.unwrap_or_else(|| workspace_root());
             let args = vec![
                 "exec".into(),
                 "--json".into(),
@@ -7728,7 +7743,7 @@ async fn dash_health() -> Json<Value> {
 }
 
 async fn dash_inbox() -> Json<Value> {
-    let inbox_path = r"C:\My Drive\Volumes\multi_ai_coordination\inbox.md";
+    let inbox_path = volumes_base_path().join("multi_ai_coordination").join("inbox.md");
     let content = match std::fs::read_to_string(inbox_path) {
         Ok(c) => c,
         Err(e) => return Json(json!({"error": format!("Cannot read inbox: {}", e)})),
@@ -7786,7 +7801,7 @@ fn flush_entry(
 async fn dash_get_prefs() -> Json<Value> {
     let prefs_path = format!(
         r"{}\CPC\config\dashboard_prefs.json",
-        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\Users\josep\AppData\Local".into())
+        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\Users\Default\AppData\Local".into())
     );
     match std::fs::read_to_string(&prefs_path) {
         Ok(c) => Json(serde_json::from_str::<Value>(&c).unwrap_or(json!({}))),
@@ -7797,7 +7812,7 @@ async fn dash_get_prefs() -> Json<Value> {
 async fn dash_post_prefs(Json(body): Json<Value>) -> Json<Value> {
     let prefs_dir = format!(
         r"{}\CPC\config",
-        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\Users\josep\AppData\Local".into())
+        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\Users\Default\AppData\Local".into())
     );
     let _ = std::fs::create_dir_all(&prefs_dir);
     let prefs_path = format!(r"{}\dashboard_prefs.json", prefs_dir);
@@ -7942,11 +7957,11 @@ async fn dash_post_task(
                 "--add-dir".into(),
                 r"C:\temp".into(),
                 "--add-dir".into(),
-                r"C:\My Drive\Volumes".into(),
+                volumes_dir(),
                 "--add-dir".into(),
                 r"C:\CPC".into(),
                 "--add-dir".into(),
-                r"C:\rust-mcp".into(),
+                workspace_root(),
             ];
             if let Some(ref wd) = working_dir {
                 args.push("--add-dir".into());
@@ -7962,7 +7977,7 @@ async fn dash_post_task(
             ));
         }
         Backend::Codex => {
-            let wd = working_dir.unwrap_or_else(|| r"C:\rust-mcp".to_string());
+            let wd = working_dir.unwrap_or_else(|| workspace_root());
             let args = vec![
                 "exec".into(),
                 "--json".into(),
@@ -8024,7 +8039,7 @@ async fn dash_cancel(
 }
 
 async fn dash_knowledge() -> Json<Value> {
-    let volumes_path = r"C:\My Drive\Volumes";
+    let volumes_path = volumes_dir();
     let mut topics: Vec<Value> = Vec::new();
     let mut recent: Vec<(String, std::time::SystemTime)> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(volumes_path) {
@@ -8063,19 +8078,19 @@ async fn dash_knowledge() -> Json<Value> {
 }
 
 async fn dash_git() -> Json<Value> {
-    let repo = r"C:\rust-mcp";
+    let repo = workspace_root();
     let (status, branch, log) = tokio::join!(
         TokioCommand::new("git")
             .args(["status", "--porcelain"])
-            .current_dir(repo)
+            .current_dir(&repo)
             .output(),
         TokioCommand::new("git")
             .args(["branch", "--show-current"])
-            .current_dir(repo)
+            .current_dir(&repo)
             .output(),
         TokioCommand::new("git")
             .args(["log", "--oneline", "-5"])
-            .current_dir(repo)
+            .current_dir(&repo)
             .output()
     );
     Json(json!({
@@ -8122,9 +8137,8 @@ async fn dash_history() -> Json<Value> {
 }
 
 fn volumes_base_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(
-        std::env::var("VOLUMES_PATH").unwrap_or_else(|_| r"C:\My Drive\Volumes".to_string()),
-    )
+    cpc_paths::volumes_path()
+        .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\My Drive\Volumes"))
 }
 
 /// Validate that a requested path is under the Volumes base directory.
@@ -8422,8 +8436,10 @@ async fn dash_api_config() -> Json<Value> {
 }
 
 /// Resolve Volumes path from env or default.
-fn volumes_path() -> String {
-    std::env::var("CPC_VOLUMES_DIR").unwrap_or_else(|_| r"C:\My Drive\Volumes".to_string())
+fn volumes_dir() -> String {
+    cpc_paths::volumes_path()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| r"C:\My Drive\Volumes".to_string())
 }
 
 /// Tail the last `n` lines of `C:\CPC\logs\mcp_activity.jsonl` and return parsed entries.
@@ -8656,7 +8672,7 @@ async fn live_status_writer(manager_port: u16) {
         Ok(c) => c,
         Err(_) => return,
     };
-    let vpath = volumes_path();
+    let vpath = volumes_dir();
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
     interval.tick().await; // skip immediate first tick — let server settle
     loop {
@@ -9544,9 +9560,9 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
         "--add-dir".to_string(),
         r"C:\temp".to_string(),
         "--add-dir".to_string(),
-        r"C:\My Drive\Volumes".to_string(),
+        volumes_dir(),
         "--add-dir".to_string(),
-        r"C:\rust-mcp".to_string(),
+        workspace_root(),
     ];
     if let Some(m) = model {
         cli_args.push("--model".to_string());
@@ -10374,10 +10390,11 @@ fn handle_codex_exec(args: Value) -> Result<Value, String> {
         .get("prompt")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'prompt'")?;
+    let ws = workspace_root();
     let working_dir = args
         .get("working_dir")
         .and_then(|v| v.as_str())
-        .unwrap_or(r"C:\rust-mcp");
+        .unwrap_or(&ws);
     let model = args.get("model").and_then(|v| v.as_str());
     let sandbox = args.get("sandbox").and_then(|v| v.as_str());
     let full_auto = args
@@ -10428,10 +10445,11 @@ fn handle_codex_exec(args: Value) -> Result<Value, String> {
 
 fn handle_codex_review(args: Value) -> Result<Value, String> {
     let prompt = args.get("prompt").and_then(|v| v.as_str());
+    let ws = workspace_root();
     let working_dir = args
         .get("working_dir")
         .and_then(|v| v.as_str())
-        .unwrap_or(r"C:\rust-mcp");
+        .unwrap_or(&ws);
     let base = args.get("base").and_then(|v| v.as_str());
     let uncommitted = args
         .get("uncommitted")

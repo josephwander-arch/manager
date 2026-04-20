@@ -23,17 +23,15 @@ What CPC is not: it is not a replacement for Claude Desktop's native tooling, no
 
 ---
 
-## What's New in v1.4.0
+## What's New in v1.4.1
 
-**Zod envelope fix + dashboard port retry.** v1.4.0 fixes the Zod validation envelope for structured task output and adds port-retry logic to the dashboard HTTP endpoint so it survives port conflicts on startup.
+**Path migration + dashboard polish.** v1.4.1 resolves 35 hardcoded paths in `src/main.rs` that leaked user-home PII and private workspace locations, making manager portable for any user. Also fixes three dashboard display bugs: progress bars no longer freeze on completed sessions, LOAFS panel shows active breadcrumbs as fallback, and COMPLETED TODAY panel wires up correct data sources.
+
+### Previous: v1.4.0 — Zod envelope fix, dashboard port retry
 
 ### Previous: v1.3.9 — Codex separator, embedded-only dashboard, archive_today_count, em-dash sentinel
 
-### Previous: v1.3.8 — Active Operations tap panel
-
-Dashboard Zone 2 aggregates breadcrumbs from all CPC servers into a single clickable panel with multi-source merge, server tags, and tap-to-expand.
-
-See [CHANGELOG.md](CHANGELOG.md) for the full history (v1.0.0 through v1.3.8), or browse the [Releases page](https://github.com/josephwander-arch/manager/releases) for per-version binaries and notes.
+See [CHANGELOG.md](CHANGELOG.md) for the full history (v1.0.0 through v1.3.9), or browse the [Releases page](https://github.com/josephwander-arch/manager/releases) for per-version binaries and notes.
 
 ---
 
@@ -73,7 +71,7 @@ skill files.
 
 ### Windows x64
 
-1. Download `manager-v1.4.0-x64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
+1. Download `manager-v1.4.1-x64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
 2. Rename to `manager.exe` and place in `%LOCALAPPDATA%\CPC\servers\`.
 3. Add to your `claude_desktop_config.json`:
    ```json
@@ -91,7 +89,7 @@ skill files.
 
 ### Windows ARM64
 
-1. Download `manager-v1.4.0-aarch64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
+1. Download `manager-v1.4.1-aarch64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
 2. Rename to `manager.exe` and place in `%LOCALAPPDATA%\CPC\servers\`.
 3. Add to your `claude_desktop_config.json`:
    ```json

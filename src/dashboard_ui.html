@@ -671,28 +671,35 @@ function renderSessions() {
       labelChipHtml = `<div class="session-label-chip" style="background:${color}22;color:${color};border-color:${color}55">${escHtml(t.label)}</div>`;
     }
 
-    // Step progress bar (from manager's [STEP n/N] parser, task steps[] array, or activity)
+    // Step progress bar — only show animated bars for running/queued; static summary for done/failed
     let stepProgressHtml = '';
-    if (t.current_step != null && t.total_steps != null && t.total_steps > 0) {
+    const isActive = t.status === 'running' || t.status === 'queued';
+    if (isActive && t.current_step != null && t.total_steps != null && t.total_steps > 0) {
       const pct = Math.round(t.current_step / t.total_steps * 100);
       const desc = t.current_step_desc ? ` · ${escHtml(t.current_step_desc)}` : '';
       stepProgressHtml = `<div class="step-progress">
         <div class="step-progress-bar"><div class="step-progress-fill" style="width:${pct}%"></div></div>
         <div class="step-progress-label">${t.current_step}/${t.total_steps}${desc}</div>
       </div>`;
-    } else if (t.step_count > 0) {
+    } else if (isActive && t.step_count > 0) {
       const done = t.steps_completed || 0;
       const pct = Math.round(done / t.step_count * 100);
       stepProgressHtml = `<div class="step-progress">
         <div class="step-progress-bar"><div class="step-progress-fill" style="width:${pct}%"></div></div>
         <div class="step-progress-label">[${done}/${t.step_count}] tool steps</div>
       </div>`;
-    } else if (t.status === 'running' && t.progress_lines > 0) {
-      // No discrete steps but task is active — show activity indicator
+    } else if (isActive && t.progress_lines > 0) {
       stepProgressHtml = `<div class="step-progress">
         <div class="step-progress-bar"><div class="step-progress-fill" style="width:100%;opacity:0.3;background:var(--accent-blue)"></div></div>
         <div class="step-progress-label">${t.progress_lines} output lines · active</div>
       </div>`;
+    } else if (!isActive) {
+      const total = t.total_steps || t.step_count || 0;
+      if (total > 0) {
+        const done = t.current_step || t.steps_completed || 0;
+        const icon = t.status === 'done' ? '\u2713' : '\u2717';
+        stepProgressHtml = `<div class="step-progress-label" style="margin-top:4px">${icon} ${done} tool steps</div>`;
+      }
     }
 
     // Live activity table (shown in expanded .card-detail)
@@ -761,16 +768,32 @@ function renderBottomStrip() {
   const ldata = state.servers.local;
   const adata = state.servers.autonomous;
 
-  // Zone 1: Active Loafs
+  // Zone 1: Active Loafs (falls back to active breadcrumbs)
   const loafBody = document.getElementById('zone-loafs-body');
   if (mdata?.loaf) {
     const loaf = mdata.loaf;
     const loafId = loaf.id || 'active';
     const loafStatus = loaf.data?.status || loaf.data?.health || '';
-    loafBody.innerHTML = `<div style="font-size:11px;color:var(--accent-green);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">● ${escHtml(String(loafId))}</div>
+    loafBody.innerHTML = `<div style="font-size:11px;color:var(--accent-green);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">\u25cf ${escHtml(String(loafId))}</div>
       ${loafStatus ? `<div style="font-size:10px;color:var(--text-secondary)">${escHtml(String(loafStatus))}</div>` : ''}`;
   } else {
-    loafBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">No active loaf</span>';
+    // Fallback: show active breadcrumbs summary
+    let bcCount = 0;
+    if (mdata?.active_breadcrumbs) bcCount += mdata.active_breadcrumbs.filter(b => !b.aborted).length;
+    if (ldata?.breadcrumbs) {
+      const lb = Array.isArray(ldata.breadcrumbs) ? ldata.breadcrumbs : (ldata.breadcrumbs.active ?? []);
+      bcCount += lb.filter(b => !b.aborted && ((b.total_steps ?? 0) === 0 || (b.steps_completed ?? 0) < (b.total_steps ?? 0))).length;
+    }
+    if (adata?.breadcrumbs) {
+      const ab = Array.isArray(adata.breadcrumbs) ? adata.breadcrumbs : (adata.breadcrumbs.active ?? []);
+      bcCount += ab.filter(b => !b.aborted && ((b.total_steps ?? 0) === 0 || (b.steps_completed ?? 0) < (b.total_steps ?? 0))).length;
+    }
+    if (bcCount > 0) {
+      loafBody.innerHTML = `<div style="font-size:11px;color:var(--accent-blue);font-weight:500">${bcCount} active operation${bcCount > 1 ? 's' : ''}</div>
+        <div style="font-size:10px;color:var(--text-secondary)">See breadcrumbs panel</div>`;
+    } else {
+      loafBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">No active loaf</span>';
+    }
   }
 
   // Zone 2: Active Breadcrumbs — merged from manager's aggregated CPC state + polled servers
@@ -871,24 +894,40 @@ function renderBottomStrip() {
     bcBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px;opacity:0.5">No active operation</span>';
   }
 
-  // Zone 3: Completed Today (last 3 from local breadcrumb history)
+  // Zone 3: Completed Today — check completed arrays + archive_today_count fallback
   const compBody = document.getElementById('zone-completed-body');
-  if (ldata?.breadcrumbs) {
-    const bcs3 = Array.isArray(ldata.breadcrumbs) ? ldata.breadcrumbs : (ldata.breadcrumbs.active ?? []);
-    const completed = bcs3.filter(b =>
+  let completedItems = [];
+
+  // Source 1: completed array from local breadcrumbs (structured response)
+  if (ldata?.breadcrumbs && !Array.isArray(ldata.breadcrumbs) && Array.isArray(ldata.breadcrumbs.completed)) {
+    completedItems = ldata.breadcrumbs.completed.filter(b => !b.aborted && b.name);
+  }
+  // Source 2: completed array from autonomous breadcrumbs
+  if (adata?.breadcrumbs && !Array.isArray(adata.breadcrumbs) && Array.isArray(adata.breadcrumbs.completed)) {
+    completedItems = completedItems.concat(adata.breadcrumbs.completed.filter(b => !b.aborted && b.name));
+  }
+  // Source 3: flat array fallback — filter for items where steps_completed >= total_steps
+  if (completedItems.length === 0 && ldata?.breadcrumbs) {
+    const all = Array.isArray(ldata.breadcrumbs) ? ldata.breadcrumbs : [...(ldata.breadcrumbs.active ?? []), ...(ldata.breadcrumbs.completed ?? [])];
+    completedItems = all.filter(b =>
       !b.aborted && b.name &&
       (b.steps_completed ?? 0) >= (b.total_steps ?? 0) && (b.total_steps ?? 0) > 0
     );
-    const last3 = completed.slice(-3).reverse();
-    if (last3.length > 0) {
-      compBody.innerHTML = last3.map(b =>
-        `<div style="font-size:11px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(b.name)}">✓ ${escHtml(b.name)}</div>`
-      ).join('');
+  }
+
+  const last3 = completedItems.slice(-3).reverse();
+  if (last3.length > 0) {
+    compBody.innerHTML = last3.map(b =>
+      `<div style="font-size:11px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(b.name)}">\u2713 ${escHtml(b.name)}</div>`
+    ).join('');
+  } else {
+    // Fallback: use archive_today_count if available
+    const archiveCount = ldata?.breadcrumbs?.archive_today_count;
+    if (typeof archiveCount === 'number' && archiveCount > 0) {
+      compBody.innerHTML = `<div style="font-size:11px;color:var(--text-secondary)">\u2713 ${archiveCount} operation${archiveCount > 1 ? 's' : ''} completed today</div>`;
     } else {
       compBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">None today</span>';
     }
-  } else {
-    compBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">—</span>';
   }
 
   // Zone 4: Last 5 Tools (cross-server: manager API log-tail + polled servers)

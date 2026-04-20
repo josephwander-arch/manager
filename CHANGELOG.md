@@ -4,6 +4,22 @@ All notable changes to the Manager MCP Server are documented here.
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-04-20
+
+### Fixed
+
+- **Path migration (portability + PII cleanup)** — `src/main.rs` had 35 hardcoded paths leaking user-home, private workspace, and Google Drive locations. Any user who isn't the original developer got broken build/deploy/git features.
+  - `C:\Users\josep\*` (7 occurrences) — resolved via `USERPROFILE` env var with `C:\Users\Default` fallback
+  - `C:\rust-mcp\*` (14 occurrences) — resolved via `CPC_WORKSPACE_ROOT` env var with `C:\rust-mcp` fallback
+  - `C:\My Drive\Volumes\*` (14 occurrences) — resolved via `cpc_paths::volumes_path()` with hardcoded fallback (same pattern as local v1.2.15)
+- **Dashboard: progress bars frozen on done/failed sessions** — Tool-step progress bars now only render animated bars for `running`/`queued` sessions. Completed sessions show a static summary (e.g. `✓ 94 tool steps`); failed sessions show `✗ N tool steps`. Previously, done/failed sessions displayed frozen mid-run progress bars.
+- **Dashboard: LOAFS panel always empty** — Panel now falls back to showing active breadcrumb count when no Project Loaf is running, sourced from manager, local, and autonomous server data.
+- **Dashboard: COMPLETED TODAY panel always empty** — Fixed data source wiring: now checks `completed` breadcrumb arrays and `archive_today_count` field instead of filtering active-only breadcrumbs (which are by definition incomplete).
+
+### Changed
+
+- **`cpc-paths` dependency bumped v0.1.0 → v0.1.1** — picks up backups path derivation fix.
+
 ## [1.4.0] - 2026-04-20
 
 ### Fixed
