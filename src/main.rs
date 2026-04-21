@@ -1,5 +1,5 @@
 #![recursion_limit = "512"]
-//! Manager MCP Server v1.4.1
+//! Manager MCP Server v1.4.3
 //! Multi-AI orchestrator: GPT (reasoning), Gemini CLI (coding), Claude Code (coding)
 //! Submit → Poll → Retrieve pattern for long-running tasks
 //!
@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
-use std::io::{self, BufRead, Read as IoRead, Write};
+use std::io::{self, BufRead, Read as IoRead, Seek, SeekFrom, Write};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
@@ -60,6 +60,7 @@ const GPT_API_URL: &str = "https://api.openai.com/v1/chat/completions";
 #[allow(dead_code)]
 const ROLLBACK_RETENTION_HOURS: i64 = 24;
 const DEFAULT_GPT_MODEL: &str = "o3";
+const MANAGER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
@@ -504,6 +505,12 @@ struct Task {
     pub continuation_of: Option<String>,
     #[serde(default)]
     pub child_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<String>,
+    #[serde(default)]
+    pub log_offset: u64,
+    #[serde(default)]
+    pub reconnected: bool,
     #[serde(default)]
     pub watchdog_observations: Vec<String>,
     #[serde(default)]
@@ -534,6 +541,521 @@ struct Task {
     pub notify_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify_body: Option<String>,
+}
+
+const MANAGER_FINAL_LOG_PREFIX: &str = "__MANAGER_FINAL__ ";
+
+#[derive(Clone)]
+struct ReconnectSpec {
+    task_id: String,
+    log_path: String,
+    offset: u64,
+    child_pid: u32,
+}
+
+fn task_workspace_dir(task_id: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(tasks_dir()).join(task_id)
+}
+
+fn task_log_path(task_id: &str) -> String {
+    task_workspace_dir(task_id)
+        .join("child.log")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn prepare_task_log(task_id: &str) -> std::io::Result<String> {
+    let task_dir = task_workspace_dir(task_id);
+    std::fs::create_dir_all(&task_dir)?;
+    let path = std::path::PathBuf::from(task_log_path(task_id));
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn open_child_log_stdio(log_path: &str) -> std::io::Result<(Stdio, Stdio)> {
+    let stdout = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+    Ok((Stdio::from(stdout), Stdio::from(stderr)))
+}
+
+fn log_file_len(log_path: &str) -> u64 {
+    std::fs::metadata(log_path).map(|m| m.len()).unwrap_or(0)
+}
+
+fn append_final_log_marker(
+    log_path: &str,
+    task_id: &str,
+    success: bool,
+    exit_code: Option<i32>,
+    error: Option<&str>,
+) {
+    let marker = json!({
+        "schema": "manager-final-v1",
+        "task_id": task_id,
+        "success": success,
+        "exit_code": exit_code,
+        "error": error,
+        "completed_at": Utc::now().to_rfc3339(),
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        let _ = writeln!(file, "{}{}", MANAGER_FINAL_LOG_PREFIX, marker);
+        let _ = file.flush();
+    }
+}
+
+fn is_process_alive(pid: u32) -> bool {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, false);
+    sys.process(Pid::from_u32(pid)).is_some()
+}
+
+fn read_log_from(log_path: &str, mut offset: u64) -> std::io::Result<(Vec<u8>, u64)> {
+    let mut file = std::fs::OpenOptions::new().read(true).open(log_path)?;
+    let len = file.metadata()?.len();
+    if offset > len {
+        offset = 0;
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    Ok((buf, len))
+}
+
+fn split_log_bytes(bytes: &[u8], partial: &mut String) -> Vec<String> {
+    let chunk = String::from_utf8_lossy(bytes);
+    let mut lines = Vec::new();
+    let mut cr_seen = false;
+    for c in chunk.chars() {
+        if c == '\n' {
+            if cr_seen {
+                cr_seen = false;
+                continue;
+            }
+            lines.push(std::mem::take(partial));
+        } else if c == '\r' {
+            cr_seen = true;
+            let line = std::mem::take(partial);
+            if !line.is_empty() {
+                lines.push(line);
+            }
+        } else {
+            cr_seen = false;
+            partial.push(c);
+        }
+    }
+    lines
+}
+
+fn append_task_output(task: &mut Task, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if !task.output.is_empty() {
+        task.output.push('\n');
+    }
+    task.output.push_str(text);
+    task.progress_lines += 1;
+    if task.status == TaskStatus::Stalled {
+        task.status = TaskStatus::Running;
+    }
+    task.last_output_chunk_at = Some(Utc::now());
+}
+
+fn apply_task_log_line(task: &mut Task, line: &str) {
+    if line.is_empty() || line.starts_with(MANAGER_FINAL_LOG_PREFIX) {
+        return;
+    }
+    task.last_activity = Some(Utc::now());
+    task.stall_detected = false;
+
+    if let Ok(ev) = serde_json::from_str::<Value>(line) {
+        let ev_type = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match ev_type {
+            "assistant" => {
+                if let Some(contents) = ev.pointer("/message/content").and_then(|v| v.as_array()) {
+                    for item in contents {
+                        match item.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                            "text" => {
+                                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                                    append_task_output(task, text);
+                                }
+                            }
+                            "tool_use" => {
+                                let tool_name = item
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown")
+                                    .to_string();
+                                task.steps.push(TaskStep {
+                                    tool: tool_name,
+                                    timestamp: Utc::now(),
+                                    status: "started".to_string(),
+                                    summary: item.get("input").map(|v| {
+                                        let s = v.to_string();
+                                        safe_truncate(&s, 120)
+                                    }),
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            "user" => {
+                if let Some(contents) = ev.pointer("/message/content").and_then(|v| v.as_array()) {
+                    for item in contents {
+                        if item.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
+                            if let Some(last) = task.steps.last_mut() {
+                                let is_err = item
+                                    .get("is_error")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false);
+                                last.status =
+                                    if is_err { "error" } else { "completed" }.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+            "item.completed" => {
+                if let Some(item) = ev.get("item") {
+                    match item.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                        "agent_message" => {
+                            if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                                append_task_output(task, text);
+                            }
+                        }
+                        "mcp_tool_call" | "command_execution" => {
+                            let tool = item
+                                .get("tool")
+                                .or_else(|| item.get("command"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown");
+                            let server = item.get("server").and_then(|v| v.as_str()).unwrap_or("");
+                            let tool_name = if server.is_empty() {
+                                tool.to_string()
+                            } else {
+                                format!("{}:{}", server, tool)
+                            };
+                            let status = item
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("completed");
+                            let has_error = item.get("error").is_some()
+                                && !item.get("error").unwrap().is_null();
+                            task.steps.push(TaskStep {
+                                tool: tool_name,
+                                timestamp: Utc::now(),
+                                status: if has_error { "error" } else { status }.to_string(),
+                                summary: item.get("arguments").or_else(|| item.get("command")).map(
+                                    |v| {
+                                        let s = v.to_string();
+                                        safe_truncate(&s, 120)
+                                    },
+                                ),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "result" => {
+                if let Some(text) = ev.get("result").and_then(|v| v.as_str()) {
+                    append_task_output(task, text);
+                }
+            }
+            _ => {}
+        }
+    } else {
+        append_task_output(task, line);
+    }
+}
+
+fn final_status_from_log(log_path: &str) -> Option<(TaskStatus, Option<String>)> {
+    let content = std::fs::read_to_string(log_path).ok()?;
+    for line in content.lines().rev() {
+        if let Some(json_part) = line.strip_prefix(MANAGER_FINAL_LOG_PREFIX) {
+            if let Ok(v) = serde_json::from_str::<Value>(json_part) {
+                let success = v.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                let err = v
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+                return Some((
+                    if success {
+                        TaskStatus::Done
+                    } else {
+                        TaskStatus::Failed
+                    },
+                    err,
+                ));
+            }
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if v.get("type").and_then(|v| v.as_str()) == Some("result") {
+                let subtype = v.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+                let is_error = v
+                    .get("is_error")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(matches!(subtype, "error" | "failure" | "failed"));
+                let err = if is_error {
+                    v.get("result")
+                        .or_else(|| v.get("error"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| safe_truncate(s, 500))
+                } else {
+                    None
+                };
+                return Some((
+                    if is_error {
+                        TaskStatus::Failed
+                    } else {
+                        TaskStatus::Done
+                    },
+                    err,
+                ));
+            }
+            if matches!(
+                v.get("type").and_then(|v| v.as_str()),
+                Some("turn.completed" | "session.completed")
+            ) {
+                return Some((TaskStatus::Done, None));
+            }
+        }
+    }
+    None
+}
+
+fn log_tail_text(log_path: &str, max_chars: usize) -> String {
+    let Ok(content) = std::fs::read_to_string(log_path) else {
+        return String::new();
+    };
+    let mut tail = content
+        .lines()
+        .filter(|line| !line.starts_with(MANAGER_FINAL_LOG_PREFIX))
+        .rev()
+        .take(40)
+        .collect::<Vec<_>>();
+    tail.reverse();
+    let joined = tail.join("\n");
+    if joined.len() <= max_chars {
+        joined
+    } else {
+        let mut start = joined.len().saturating_sub(max_chars);
+        while start < joined.len() && !joined.is_char_boundary(start) {
+            start += 1;
+        }
+        format!("...{}", &joined[start..])
+    }
+}
+
+fn drain_task_log_once(task: &mut Task, log_path: &str) {
+    let mut partial = String::new();
+    if let Ok((bytes, new_offset)) = read_log_from(log_path, task.log_offset) {
+        let lines = split_log_bytes(&bytes, &mut partial);
+        for line in lines {
+            apply_task_log_line(task, &line);
+        }
+        if !partial.is_empty() {
+            apply_task_log_line(task, &partial);
+        }
+        task.log_offset = new_offset;
+    }
+}
+
+async fn process_log_lines(
+    tasks: &Arc<RwLock<HashMap<String, Task>>>,
+    task_id: &str,
+    lines: &[String],
+    offset: u64,
+) {
+    if lines.is_empty() {
+        return;
+    }
+    let mut store = tasks.write().await;
+    if let Some(task) = store.get_mut(task_id) {
+        if matches!(
+            task.status,
+            TaskStatus::Cancelled | TaskStatus::Failed | TaskStatus::Done
+        ) {
+            task.log_offset = offset;
+            Server::persist_task(task);
+            return;
+        }
+        for line in lines {
+            apply_task_log_line(task, line);
+        }
+        task.log_offset = offset;
+        Server::persist_task(task);
+    }
+}
+
+async fn finalize_reconnected_task(
+    tasks: Arc<RwLock<HashMap<String, Task>>>,
+    task_id: String,
+    log_path: String,
+    partial: String,
+    offset: u64,
+) {
+    let final_state = final_status_from_log(&log_path);
+    let mut completed_snap: Option<Task> = None;
+    {
+        let mut store = tasks.write().await;
+        if let Some(task) = store.get_mut(&task_id) {
+            if !partial.is_empty() {
+                apply_task_log_line(task, &partial);
+            }
+            if matches!(
+                task.status,
+                TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled
+            ) {
+                task.log_offset = offset;
+                Server::persist_task(task);
+                return;
+            }
+            match final_state {
+                Some((status, error)) => {
+                    let status_label = status.to_string();
+                    task.status = status;
+                    task.error = error;
+                    task.watchdog_observations.push(format!(
+                        "[{}] Reconnected child exited; finalized from log marker as {}",
+                        Utc::now().format("%H:%M:%S"),
+                        status_label
+                    ));
+                }
+                None => {
+                    task.status = TaskStatus::Failed;
+                    task.error = Some("orphaned-pid-dead".to_string());
+                    task.watchdog_observations.push(format!(
+                        "[{}] Reconnected child PID is dead and log has no clean completion marker — marking failed (orphaned-pid-dead)",
+                        Utc::now().format("%H:%M:%S")
+                    ));
+                }
+            }
+            task.completed_at = Some(Utc::now());
+            task.log_offset = offset;
+            if task.status == TaskStatus::Done {
+                Server::validate_output(task);
+            }
+            Server::flag_extraction(task);
+            Server::persist_task(task);
+            Server::save_to_history(task);
+            save_task_artifact(task);
+            check_and_fire_task_notify(task, &RealNotifier);
+            auto_advance_loaf_on_task_complete(task);
+            completed_snap = Some(task.clone());
+        }
+    }
+    if let Some(ref ct) = completed_snap {
+        spawn_on_complete(ct, tasks.clone(), None, &tokio::runtime::Handle::current());
+    }
+}
+
+async fn tail_task_log(
+    tasks: Arc<RwLock<HashMap<String, Task>>>,
+    task_id: String,
+    log_path: String,
+    mut offset: u64,
+    child_pid: Option<u32>,
+    finalize_on_pid_exit: bool,
+) {
+    let mut partial = String::new();
+    loop {
+        match read_log_from(&log_path, offset) {
+            Ok((bytes, new_offset)) => {
+                if !bytes.is_empty() {
+                    offset = new_offset;
+                    let lines = split_log_bytes(&bytes, &mut partial);
+                    process_log_lines(&tasks, &task_id, &lines, offset).await;
+                }
+            }
+            Err(e) => {
+                let mut store = tasks.write().await;
+                if let Some(task) = store.get_mut(&task_id) {
+                    task.watchdog_observations.push(format!(
+                        "[{}] Log tail read failed for {}: {}",
+                        Utc::now().format("%H:%M:%S"),
+                        log_path,
+                        e
+                    ));
+                    Server::persist_task(task);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            }
+        }
+
+        if finalize_on_pid_exit {
+            if let Some(pid) = child_pid {
+                if !is_process_alive(pid) {
+                    for _ in 0..3 {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        if let Ok((bytes, new_offset)) = read_log_from(&log_path, offset) {
+                            if !bytes.is_empty() {
+                                offset = new_offset;
+                                let lines = split_log_bytes(&bytes, &mut partial);
+                                process_log_lines(&tasks, &task_id, &lines, offset).await;
+                            }
+                        }
+                    }
+                    finalize_reconnected_task(
+                        tasks.clone(),
+                        task_id.clone(),
+                        log_path.clone(),
+                        std::mem::take(&mut partial),
+                        offset,
+                    )
+                    .await;
+                    break;
+                }
+            }
+        } else {
+            let terminal = {
+                let store = tasks.read().await;
+                store
+                    .get(&task_id)
+                    .map(|task| {
+                        matches!(
+                            task.status,
+                            TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled
+                        )
+                    })
+                    .unwrap_or(true)
+            };
+            if terminal {
+                if offset >= log_file_len(&log_path) {
+                    if !partial.is_empty() {
+                        process_log_lines(
+                            &tasks,
+                            &task_id,
+                            &[std::mem::take(&mut partial)],
+                            offset,
+                        )
+                        .await;
+                    }
+                    break;
+                }
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }
 
 /// Item 16: Task routing intelligence — recommends the best backend for a prompt.
@@ -634,6 +1156,145 @@ struct Server {
 }
 
 impl Server {
+    fn persist_recovered_terminal_task(task: &mut Task) {
+        if task.status == TaskStatus::Done {
+            Server::validate_output(task);
+        }
+        Server::flag_extraction(task);
+        Server::persist_task(task);
+        Server::save_to_history(task);
+        save_task_artifact(task);
+    }
+
+    fn reconnect_orphaned_tasks(
+        tasks: &mut HashMap<String, Task>,
+    ) -> (Vec<String>, Vec<ReconnectSpec>) {
+        let mut recovery_failed_ids = Vec::new();
+        let mut reconnect_specs = Vec::new();
+
+        for task in tasks.values_mut() {
+            if !matches!(
+                task.status,
+                TaskStatus::Queued | TaskStatus::Running | TaskStatus::Paused | TaskStatus::Stalled
+            ) {
+                continue;
+            }
+
+            let is_session = task.id.starts_with("ses_");
+            task.watchdog_observations.push(format!(
+                "[{}] reconnect_orphaned_tasks: task was {} at manager startup. Child PID: {}",
+                Utc::now().format("%H:%M:%S"),
+                task.status,
+                task.child_pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "unknown".into())
+            ));
+
+            let Some(log_path) = task.log_path.clone() else {
+                task.status = TaskStatus::Failed;
+                task.error = Some("pre-v1.4.3-no-logfile".to_string());
+                task.completed_at = Some(Utc::now());
+                task.watchdog_observations.push(format!(
+                    "[{}] No log_path on task record — marking failed (pre-v1.4.3-no-logfile)",
+                    Utc::now().format("%H:%M:%S")
+                ));
+                Server::persist_recovered_terminal_task(task);
+                if !is_session {
+                    recovery_failed_ids.push(task.id.clone());
+                }
+                continue;
+            };
+
+            if !std::path::Path::new(&log_path).exists() {
+                task.status = TaskStatus::Failed;
+                task.error = Some("orphaned-logfile-missing".to_string());
+                task.completed_at = Some(Utc::now());
+                task.watchdog_observations.push(format!(
+                    "[{}] log_path exists in task record but file is missing: {}",
+                    Utc::now().format("%H:%M:%S"),
+                    log_path
+                ));
+                Server::persist_recovered_terminal_task(task);
+                if !is_session {
+                    recovery_failed_ids.push(task.id.clone());
+                }
+                continue;
+            }
+
+            let pid_alive = task.child_pid.map(is_process_alive).unwrap_or(false);
+            task.log_offset = task.log_offset.min(log_file_len(&log_path));
+
+            if pid_alive {
+                let pid = task.child_pid.unwrap();
+                task.status = TaskStatus::Running;
+                task.reconnected = true;
+                task.watchdog_observations.push(format!(
+                    "[{}] Child PID {} is alive — reconnected to persistent log {} from offset {}",
+                    Utc::now().format("%H:%M:%S"),
+                    pid,
+                    log_path,
+                    task.log_offset
+                ));
+                reconnect_specs.push(ReconnectSpec {
+                    task_id: task.id.clone(),
+                    log_path,
+                    offset: task.log_offset,
+                    child_pid: pid,
+                });
+                Server::persist_task(task);
+                continue;
+            }
+
+            if task.child_pid.is_some() {
+                drain_task_log_once(task, &log_path);
+                match final_status_from_log(&log_path) {
+                    Some((status, error)) => {
+                        let status_label = status.to_string();
+                        task.status = status;
+                        task.error = error;
+                        task.completed_at = Some(Utc::now());
+                        task.watchdog_observations.push(format!(
+                            "[{}] Child PID is dead; finalized from log marker as {}",
+                            Utc::now().format("%H:%M:%S"),
+                            status_label
+                        ));
+                        Server::persist_recovered_terminal_task(task);
+                        if task.status == TaskStatus::Failed && !is_session {
+                            recovery_failed_ids.push(task.id.clone());
+                        }
+                    }
+                    None => {
+                        task.status = TaskStatus::Failed;
+                        task.error = Some("orphaned-pid-dead".to_string());
+                        task.completed_at = Some(Utc::now());
+                        task.watchdog_observations.push(format!(
+                            "[{}] Child PID is dead and log has no clean completion marker — marking failed (orphaned-pid-dead)",
+                            Utc::now().format("%H:%M:%S")
+                        ));
+                        Server::persist_recovered_terminal_task(task);
+                        if !is_session {
+                            recovery_failed_ids.push(task.id.clone());
+                        }
+                    }
+                }
+            } else {
+                task.status = TaskStatus::Failed;
+                task.error = Some("orphaned-no-pid".to_string());
+                task.completed_at = Some(Utc::now());
+                task.watchdog_observations.push(format!(
+                    "[{}] log_path exists but child_pid is missing — marking failed (orphaned-no-pid)",
+                    Utc::now().format("%H:%M:%S")
+                ));
+                Server::persist_recovered_terminal_task(task);
+                if !is_session {
+                    recovery_failed_ids.push(task.id.clone());
+                }
+            }
+        }
+
+        (recovery_failed_ids, reconnect_specs)
+    }
+
     fn new(runtime: tokio::runtime::Handle) -> Self {
         // Try to load OpenAI key from env
         let openai_key = std::env::var("OPENAI_API_KEY").ok();
@@ -647,122 +1308,19 @@ impl Server {
 
         // Load any persisted tasks
         let mut tasks = HashMap::new();
-        // v1.3.3 (Opus review B1): collect IDs of tasks marked Failed during recovery
-        // so we can fire notify after the notifier exists (post-Server-construction).
-        let mut recovery_failed_ids: Vec<String> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(tasks_dir()) {
             for entry in entries.flatten() {
                 if entry.path().extension().is_some_and(|e| e == "json") {
                     if let Ok(data) = std::fs::read_to_string(entry.path()) {
                         if let Ok(task) = serde_json::from_str::<Task>(&data) {
-                            // Observe — do NOT clobber Running/Queued tasks as Failed.
-                            // The child process may still be alive even though manager restarted.
-                            let mut task = task;
-                            if task.status == TaskStatus::Running
-                                || task.status == TaskStatus::Queued
-                            {
-                                let is_session = task.id.starts_with("ses_");
-                                let obs = format!(
-                                    "[{}] Manager restarted — task was {} at load time. Child PID: {}",
-                                    Utc::now().format("%H:%M:%S"),
-                                    task.status,
-                                    task.child_pid.map(|p| p.to_string()).unwrap_or_else(|| "unknown".into())
-                                );
-                                task.watchdog_observations.push(obs);
-                                // Check if child PID is still alive (best-effort)
-                                let child_alive = task
-                                    .child_pid
-                                    .map(|pid| {
-                                        std::process::Command::new("tasklist")
-                                            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-                                            .output()
-                                            .map(|o| {
-                                                String::from_utf8_lossy(&o.stdout)
-                                                    .contains(&pid.to_string())
-                                            })
-                                            .unwrap_or(false)
-                                    })
-                                    .unwrap_or(false);
-                                if child_alive {
-                                    if is_session {
-                                        // v1.2.7: Session child still alive but stdout/stderr pipes were
-                                        // lost when manager restarted. Cannot re-attach OS pipes after
-                                        // the fact — mark orphaned so session_list surfaces it clearly.
-                                        // User can destroy the session and start a new one.
-                                        let obs2 = format!(
-                                            "[{}] Session child PID {} still alive but stdout/stderr pipes lost after manager restart — marking orphaned",
-                                            Utc::now().format("%H:%M:%S"),
-                                            task.child_pid.unwrap()
-                                        );
-                                        task.watchdog_observations.push(obs2);
-                                        task.status = TaskStatus::Orphaned;
-                                    } else {
-                                        let obs2 = format!(
-                                            "[{}] Child PID {} still alive — keeping task status as {}",
-                                            Utc::now().format("%H:%M:%S"),
-                                            task.child_pid.unwrap(),
-                                            task.status
-                                        );
-                                        task.watchdog_observations.push(obs2);
-                                    }
-                                } else if task.child_pid.is_some() {
-                                    // v1.3.5: Before marking Failed, check if task file was recently written.
-                                    // If mtime < 10min ago, task may have completed silently just before manager restart.
-                                    // Mark Orphaned in that case (no auto-fail notify, user can investigate).
-                                    let task_file = format!("{}\\{}.json", tasks_dir(), task.id);
-                                    let recently_written = std::fs::metadata(&task_file)
-                                        .and_then(|m| m.modified())
-                                        .ok()
-                                        .and_then(|mtime| mtime.elapsed().ok())
-                                        .map(|elapsed| elapsed.as_secs() < 600)
-                                        .unwrap_or(false);
-                                    if recently_written {
-                                        let obs2 = format!(
-                                            "[{}] Child PID {} is dead BUT task file was written in last 10 min — marking Orphaned (not Failed) for manual review",
-                                            Utc::now().format("%H:%M:%S"),
-                                            task.child_pid.unwrap()
-                                        );
-                                        task.watchdog_observations.push(obs2);
-                                        task.status = TaskStatus::Orphaned;
-                                        Server::persist_task(&task);
-                                        // Do NOT queue for notify — ambiguous state
-                                    } else {
-                                        let obs2 = format!(
-                                            "[{}] Child PID {} is dead and task file is stale (>10min) — marking task as failed",
-                                            Utc::now().format("%H:%M:%S"),
-                                            task.child_pid.unwrap()
-                                        );
-                                        task.watchdog_observations.push(obs2);
-                                        task.status = TaskStatus::Failed;
-                                        task.error = Some("Child process exited without reporting result (manager restarted)".into());
-                                        Server::persist_task(&task);
-                                        if !is_session {
-                                            recovery_failed_ids.push(task.id.clone());
-                                        }
-                                    }
-                                } else {
-                                    // No child_pid stored — legacy task from before PID tracking.
-                                    // Cannot verify liveness across manager restart, mark failed.
-                                    let obs2 = format!(
-                                        "[{}] Legacy task (no child_pid stored) — cannot verify liveness across manager restart, marking failed. Restore from DB if child actually completed.",
-                                        Utc::now().format("%H:%M:%S"),
-                                    );
-                                    task.watchdog_observations.push(obs2);
-                                    task.status = TaskStatus::Failed;
-                                    task.error = Some("Legacy task without PID tracking — cannot verify liveness across manager restart".into());
-                                    Server::persist_task(&task);
-                                    // v1.3.3: queue for notify after notifier exists
-                                    if !is_session {
-                                        recovery_failed_ids.push(task.id.clone());
-                                    }
-                                }
-                            }
                             tasks.insert(task.id.clone(), task);
                         }
                     }
                 }
             }
         }
+
+        let (recovery_failed_ids, reconnect_specs) = Server::reconnect_orphaned_tasks(&mut tasks);
 
         // v1.3.3 (Opus review B1): fire notify for tasks marked Failed during recovery.
         // Notifier wasn't available during the load loop above, but we can use RealNotifier
@@ -784,7 +1342,7 @@ impl Server {
             });
         }
 
-        Server {
+        let server = Server {
             tasks: Arc::new(RwLock::new(tasks)),
             config: Arc::new(RwLock::new(ServerConfig {
                 openai_api_key: openai_key,
@@ -796,7 +1354,21 @@ impl Server {
             notifier: Arc::new(RealNotifier),
             recent_tool_calls: Arc::new(Mutex::new(VecDeque::new())),
             stdin_pipes: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        for spec in reconnect_specs {
+            let tasks_c = server.tasks.clone();
+            server.runtime.spawn(tail_task_log(
+                tasks_c,
+                spec.task_id,
+                spec.log_path,
+                spec.offset,
+                Some(spec.child_pid),
+                true,
+            ));
         }
+
+        server
     }
 
     /// Write a JSON-RPC message to stdout (shared across threads).
@@ -1282,6 +1854,9 @@ impl Server {
             forked_from: None,
             continuation_of: None,
             child_pid: None,
+            log_path: None,
+            log_offset: 0,
+            reconnected: false,
             watchdog_observations: Vec::new(),
             fingerprint: None,
             superseded_by: None,
@@ -1716,6 +2291,9 @@ fn spawn_on_complete(
         forked_from: None,
         continuation_of: None,
         child_pid: None,
+        log_path: None,
+        log_offset: 0,
+        reconnected: false,
         watchdog_observations: Vec::new(),
         fingerprint: None,
         superseded_by: None,
@@ -1956,101 +2534,97 @@ async fn run_codex_task(
         }
     }
 
+    let log_path = match prepare_task_log(&task_id) {
+        Ok(path) => path,
+        Err(e) => {
+            let mut store = tasks.write().await;
+            if let Some(task) = store.get_mut(&task_id) {
+                task.status = TaskStatus::Failed;
+                task.error = Some(format!("Failed to prepare child log: {}", e));
+                task.completed_at = Some(Utc::now());
+                Server::persist_task(task);
+                Server::save_to_history(task);
+                check_and_fire_task_notify(task, &RealNotifier);
+            }
+            return;
+        }
+    };
+    {
+        let mut store = tasks.write().await;
+        if let Some(task) = store.get_mut(&task_id) {
+            task.log_path = Some(log_path.clone());
+            task.log_offset = 0;
+            Server::persist_task(task);
+        }
+    }
+
     let args_clone = args.clone();
     let wd = working_dir.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(codex_cmd())
-            .args(&args_clone)
-            .current_dir(&wd)
-            .output()
-    })
-    .await;
+    let log_path_for_child = log_path.clone();
+    let task_id_for_marker = task_id.clone();
+    let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<u32>();
+    let result =
+        tokio::task::spawn_blocking(move || -> Result<std::process::ExitStatus, String> {
+            let (stdout_stdio, stderr_stdio) =
+                open_child_log_stdio(&log_path_for_child).map_err(|e| e.to_string())?;
+            let mut child = std::process::Command::new(codex_cmd())
+                .args(&args_clone)
+                .current_dir(&wd)
+                .stdout(stdout_stdio)
+                .stderr(stderr_stdio)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            let _ = pid_tx.send(child.id());
+            let status = child.wait().map_err(|e| e.to_string())?;
+            append_final_log_marker(
+                &log_path_for_child,
+                &task_id_for_marker,
+                status.success(),
+                status.code(),
+                if status.success() {
+                    None
+                } else {
+                    Some("process-exit-nonzero")
+                },
+            );
+            Ok(status)
+        });
+
+    if let Ok(pid) = pid_rx.await {
+        let mut store = tasks.write().await;
+        if let Some(task) = store.get_mut(&task_id) {
+            task.child_pid = Some(pid);
+            Server::persist_task(task);
+        }
+        drop(store);
+        tokio::spawn(tail_task_log(
+            tasks.clone(),
+            task_id.clone(),
+            log_path.clone(),
+            0,
+            Some(pid),
+            false,
+        ));
+    }
+
+    let result = result.await;
 
     let mut store = tasks.write().await;
     let mut retry_task: Option<Task> = None;
     let mut completed_snap: Option<Task> = None;
     if let Some(task) = store.get_mut(&task_id) {
         match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                // Parse JSONL events
-                for line in stdout.lines() {
-                    if let Ok(ev) = serde_json::from_str::<Value>(line) {
-                        task.last_activity = Some(Utc::now());
-                        let ev_type = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                        if ev_type == "item.completed" {
-                            if let Some(item) = ev.get("item") {
-                                match item.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-                                    "agent_message" => {
-                                        if let Some(text) =
-                                            item.get("text").and_then(|v| v.as_str())
-                                        {
-                                            if !text.is_empty() {
-                                                if !task.output.is_empty() {
-                                                    task.output.push('\n');
-                                                }
-                                                task.output.push_str(text);
-                                                task.progress_lines += 1;
-                                            }
-                                        }
-                                    }
-                                    "mcp_tool_call" | "command_execution" => {
-                                        let tool = item
-                                            .get("tool")
-                                            .or_else(|| item.get("command"))
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("unknown");
-                                        let server = item
-                                            .get("server")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("");
-                                        let tool_name = if server.is_empty() {
-                                            tool.to_string()
-                                        } else {
-                                            format!("{}:{}", server, tool)
-                                        };
-                                        let has_error = item
-                                            .get("error")
-                                            .map(|e| !e.is_null())
-                                            .unwrap_or(false);
-                                        let status = if has_error { "error" } else { "completed" };
-                                        task.steps.push(TaskStep {
-                                            tool: tool_name,
-                                            timestamp: Utc::now(),
-                                            status: status.to_string(),
-                                            summary: item
-                                                .get("arguments")
-                                                .or_else(|| item.get("command"))
-                                                .map(|v| {
-                                                    let s = v.to_string();
-                                                    {
-                                                        let s_ref: &str = &s;
-                                                        safe_truncate(s_ref, 120)
-                                                    }
-                                                }),
-                                        });
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-                task.status = if output.status.success() {
+            Ok(Ok(status)) => {
+                task.status = if status.success() {
                     TaskStatus::Done
                 } else {
                     TaskStatus::Failed
                 };
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
+                if !status.success() {
                     task.error = Some(format!(
-                        "Exit {}: {}",
-                        output.status.code().unwrap_or(-1),
-                        if stderr.len() > 500 {
-                            &stderr[stderr.len() - 500..]
-                        } else {
-                            &stderr
-                        }
+                        "Exit {}. See child log: {}",
+                        status.code().unwrap_or(-1),
+                        log_path
                     ));
                 }
             }
@@ -2140,11 +2714,50 @@ async fn run_cli_task(
         store.get(&task_id).and_then(|t| t.role.clone())
     };
 
+    let log_path = match prepare_task_log(&task_id) {
+        Ok(path) => path,
+        Err(e) => {
+            let mut store = tasks.write().await;
+            if let Some(task) = store.get_mut(&task_id) {
+                task.status = TaskStatus::Failed;
+                task.error = Some(format!("Failed to prepare child log: {}", e));
+                task.completed_at = Some(Utc::now());
+                Server::persist_task(task);
+                Server::save_to_history(task);
+                check_and_fire_task_notify(task, &RealNotifier);
+            }
+            return;
+        }
+    };
+    {
+        let mut store = tasks.write().await;
+        if let Some(task) = store.get_mut(&task_id) {
+            task.log_path = Some(log_path.clone());
+            task.log_offset = 0;
+            Server::persist_task(task);
+        }
+    }
+    let (stdout_stdio, stderr_stdio) = match open_child_log_stdio(&log_path) {
+        Ok(stdio) => stdio,
+        Err(e) => {
+            let mut store = tasks.write().await;
+            if let Some(task) = store.get_mut(&task_id) {
+                task.status = TaskStatus::Failed;
+                task.error = Some(format!("Failed to open child log stdio: {}", e));
+                task.completed_at = Some(Utc::now());
+                Server::persist_task(task);
+                Server::save_to_history(task);
+                check_and_fire_task_notify(task, &RealNotifier);
+            }
+            return;
+        }
+    };
+
     let mut cmd = TokioCommand::new(&spawn_cmd);
     cmd.args(&spawn_args)
         .current_dir(&working_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(stdout_stdio)
+        .stderr(stderr_stdio)
         .stdin(match stdin_mode {
             StdinMode::Null => Stdio::null(),
             StdinMode::Piped => Stdio::piped(),
@@ -2202,6 +2815,14 @@ async fn run_cli_task(
             Server::persist_task(task);
         }
         drop(store);
+        tokio::spawn(tail_task_log(
+            tasks.clone(),
+            task_id.clone(),
+            log_path.clone(),
+            0,
+            Some(pid),
+            false,
+        ));
     }
 
     // Capture stdin pipe for send() support
@@ -2612,6 +3233,27 @@ async fn run_cli_task(
         stderr_out
     };
 
+    match &exit_status {
+        Ok(status) => append_final_log_marker(
+            &log_path,
+            &task_id,
+            status.success(),
+            status.code(),
+            if status.success() {
+                None
+            } else {
+                Some("process-exit-nonzero")
+            },
+        ),
+        Err(e) => append_final_log_marker(
+            &log_path,
+            &task_id,
+            false,
+            None,
+            Some(&format!("Process error: {}", e)),
+        ),
+    }
+
     // Update final status
     let mut store = tasks.write().await;
     let mut retry_task: Option<Task> = None;
@@ -2661,6 +3303,16 @@ async fn run_cli_task(
                         ctx_file
                     ));
                 } else {
+                    let stderr_msg = if stderr_msg.is_empty() {
+                        let tail = log_tail_text(&log_path, 500);
+                        if tail.is_empty() {
+                            format!("See child log: {}", log_path)
+                        } else {
+                            format!("{}\nChild log: {}", tail, log_path)
+                        }
+                    } else {
+                        stderr_msg
+                    };
                     task.error = Some(format!(
                         "Exit code {}. Stderr: {}",
                         status.code().unwrap_or(-1),
@@ -2987,6 +3639,9 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
         forked_from: None,
         continuation_of: None,
         child_pid: None,
+        log_path: None,
+        log_offset: 0,
+        reconnected: false,
         watchdog_observations: Vec::new(),
         fingerprint: Some(fp.clone()),
         superseded_by: None,
@@ -3452,7 +4107,10 @@ fn handle_get_status(server: &Server, params: Value) -> Result<Value, String> {
         "output_preview": output_preview,
         "warning": warning,
         "watchdog_observations": task.watchdog_observations,
-        "child_pid": task.child_pid
+        "child_pid": task.child_pid,
+        "log_path": task.log_path,
+        "log_offset": task.log_offset,
+        "reconnected": task.reconnected
     }))
 }
 
@@ -4620,6 +5278,9 @@ fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
         forked_from: None,
         continuation_of: None,
         child_pid: None,
+        log_path: None,
+        log_offset: 0,
+        reconnected: false,
         watchdog_observations: Vec::new(),
         fingerprint: None,
         superseded_by: None,
@@ -6610,6 +7271,9 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
         forked_from: None,
         continuation_of: None,
         child_pid: None,
+        log_path: None,
+        log_offset: 0,
+        reconnected: false,
         watchdog_observations: Vec::new(),
         fingerprint: None,
         superseded_by: None,
@@ -7907,6 +8571,9 @@ async fn dash_post_task(
         forked_from: None,
         continuation_of: None,
         child_pid: None,
+        log_path: None,
+        log_offset: 0,
+        reconnected: false,
         watchdog_observations: Vec::new(),
         fingerprint: None,
         superseded_by: None,
@@ -8804,6 +9471,9 @@ async fn api_register_external_task(
         forked_from: None,
         continuation_of: None,
         child_pid: None,
+        log_path: None,
+        log_offset: 0,
+        reconnected: false,
         watchdog_observations: vec![],
         fingerprint: None,
         superseded_by: None,
@@ -9191,7 +9861,7 @@ fn start_pipe_server(
                             "jsonrpc": "2.0", "id": request.id,
                             "result": {
                                 "protocolVersion": "2024-11-05",
-                                "serverInfo": {"name": "manager", "version": "1.0.0"},
+                                "serverInfo": {"name": "manager", "version": MANAGER_VERSION},
                                 "capabilities": {"tools": {}}
                             }
                         }),
@@ -9381,7 +10051,7 @@ fn main() {
                 id: request.id,
                 result: json!({
                     "protocolVersion": "2024-11-05",
-                    "serverInfo": {"name": "manager", "version": "1.0.0"},
+                    "serverInfo": {"name": "manager", "version": MANAGER_VERSION},
                     "capabilities": {"tools": {}}
                 }),
             },
@@ -9657,6 +10327,9 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
                 forked_from: None,
                 continuation_of: None,
                 child_pid: None,
+                log_path: None,
+                log_offset: 0,
+                reconnected: false,
                 watchdog_observations: Vec::new(),
                 fingerprint: Some(fp.clone()),
                 superseded_by: None,
@@ -10258,6 +10931,9 @@ fn handle_send_to_session(server: &Server, args: Value) -> Result<Value, String>
                 forked_from: None,
                 continuation_of: None,
                 child_pid: None,
+                log_path: None,
+                log_offset: 0,
+                reconnected: false,
                 watchdog_observations: Vec::new(),
                 fingerprint: None,
                 superseded_by: None,
@@ -10749,6 +11425,9 @@ mod tests {
             forked_from: None,
             continuation_of: None,
             child_pid: None,
+            log_path: None,
+            log_offset: 0,
+            reconnected: false,
             watchdog_observations: Vec::new(),
             fingerprint: None,
             superseded_by: None,

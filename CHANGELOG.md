@@ -4,6 +4,20 @@ All notable changes to the Manager MCP Server are documented here.
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-04-20
+
+### Added
+
+- `reconnect_orphaned_tasks()` runs at startup and reconnects task records to per-task log files at `%LOCALAPPDATA%\manager-mcp\tasks\{id}\child.log`.
+
+### Fixed
+
+- Task subprocesses that survive a Claude Desktop restart are now reconnected to their persistent log or properly finalized instead of silently stalling. This addresses 5 observed manager-restart orphan incidents from Apr 17-19.
+
+### Migration
+
+- Old task records without `log_path` are marked failed with reason `pre-v1.4.3-no-logfile` on first startup because their orphaned stdout/stderr streams cannot be reconstructed.
+
 ## [1.4.2] - 2026-04-20
 
 ### Changed
