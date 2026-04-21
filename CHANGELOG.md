@@ -23,7 +23,7 @@ All notable changes to the Manager MCP Server are documented here.
 ### Changed
 
 - Default preferred dashboard port changed from `9200` to `9218` to move further above the
-  MCP server range (local:9101, hands:9102, workflow:9103, autonomous:9104) and avoid drift
+  MCP server range (local 9101, hands 9102, workflow 9103, auto 9104) and avoid drift
   observed on setups where 9200 was occasionally occupied.
 
 ### Added

@@ -25,13 +25,13 @@ What CPC is not: it is not a replacement for Claude Desktop's native tooling, no
 
 ---
 
-## What's New in v1.4.2
+## What's New in v1.4.3
 
-**Dashboard port stability.** Default port moved to `9218` (above MCP server range), and the bound URL is now written to `%LOCALAPPDATA%\manager-mcp\dashboard_url.txt` on every startup so you never lose it across Claude restarts.
+**Reconnect orphaned tasks on restart.** Task subprocesses that survive a Claude Desktop restart are now reconnected to their persistent log files instead of silently stalling. Startup calls `reconnect_orphaned_tasks()` to scan `%LOCALAPPDATA%\manager-mcp\tasks\` for running processes.
+
+### Previous: v1.4.2 — Dashboard port stability
 
 ### Previous: v1.4.1 — Path migration + dashboard polish
-
-### Previous: v1.4.0 — Zod envelope fix, dashboard port retry
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history (v1.0.0 through v1.4.1), or browse the [Releases page](https://github.com/josephwander-arch/manager/releases) for per-version binaries and notes.
 

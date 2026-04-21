@@ -636,6 +636,82 @@ fn read_log_from(log_path: &str, mut offset: u64) -> std::io::Result<(Vec<u8>, u
     Ok((buf, len))
 }
 
+#[cfg(windows)]
+fn wait_for_process_exit(pid: u32) -> Result<u32, String> {
+    use std::ffi::c_void;
+
+    type Handle = *mut c_void;
+
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const WAIT_OBJECT_0: u32 = 0x0000_0000;
+    const WAIT_FAILED: u32 = 0xFFFF_FFFF;
+    const INFINITE: u32 = 0xFFFF_FFFF;
+    const STILL_ACTIVE: u32 = 259;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+        fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+        fn GetExitCodeProcess(handle: Handle, exit_code: *mut u32) -> i32;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+
+    unsafe {
+        let handle = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return Err(format!(
+                "OpenProcess failed for PID {}: {}",
+                pid,
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let wait_status = WaitForSingleObject(handle, INFINITE);
+        if wait_status == WAIT_FAILED {
+            let err = std::io::Error::last_os_error();
+            let _ = CloseHandle(handle);
+            return Err(format!(
+                "WaitForSingleObject failed for PID {}: {}",
+                pid, err
+            ));
+        }
+        if wait_status != WAIT_OBJECT_0 {
+            let _ = CloseHandle(handle);
+            return Err(format!(
+                "Unexpected wait status {} for PID {}",
+                wait_status, pid
+            ));
+        }
+
+        let mut exit_code = STILL_ACTIVE;
+        if GetExitCodeProcess(handle, &mut exit_code as *mut u32) == 0 {
+            let err = std::io::Error::last_os_error();
+            let _ = CloseHandle(handle);
+            return Err(format!(
+                "GetExitCodeProcess failed for PID {}: {}",
+                pid, err
+            ));
+        }
+        let _ = CloseHandle(handle);
+        if exit_code == STILL_ACTIVE {
+            return Err(format!(
+                "PID {} reported STILL_ACTIVE after wait completion",
+                pid
+            ));
+        }
+        Ok(exit_code)
+    }
+}
+
+#[cfg(not(windows))]
+fn wait_for_process_exit(pid: u32) -> Result<u32, String> {
+    Err(format!(
+        "wait_for_process_exit is only implemented on Windows (pid {})",
+        pid
+    ))
+}
+
 fn split_log_bytes(bytes: &[u8], partial: &mut String) -> Vec<String> {
     let chunk = String::from_utf8_lossy(bytes);
     let mut lines = Vec::new();
@@ -929,6 +1005,7 @@ async fn finalize_reconnected_task(
                 Server::persist_task(task);
                 return;
             }
+            drain_task_log_once(task, &log_path);
             match final_state {
                 Some((status, error)) => {
                     let status_label = status.to_string();
@@ -950,7 +1027,7 @@ async fn finalize_reconnected_task(
                 }
             }
             task.completed_at = Some(Utc::now());
-            task.log_offset = offset;
+            task.log_offset = log_file_len(&log_path).max(offset);
             if task.status == TaskStatus::Done {
                 Server::validate_output(task);
             }
@@ -966,6 +1043,59 @@ async fn finalize_reconnected_task(
     if let Some(ref ct) = completed_snap {
         spawn_on_complete(ct, tasks.clone(), None, &tokio::runtime::Handle::current());
     }
+}
+
+async fn watch_reconnected_process_exit(
+    tasks: Arc<RwLock<HashMap<String, Task>>>,
+    task_id: String,
+    log_path: String,
+    child_pid: u32,
+) {
+    let wait_result = tokio::task::spawn_blocking(move || wait_for_process_exit(child_pid)).await;
+
+    match wait_result {
+        Ok(Ok(exit_code)) => append_final_log_marker(
+            &log_path,
+            &task_id,
+            exit_code == 0,
+            Some(exit_code as i32),
+            if exit_code == 0 {
+                None
+            } else {
+                Some("process-exit-nonzero")
+            },
+        ),
+        Ok(Err(e)) => {
+            let mut store = tasks.write().await;
+            if let Some(task) = store.get_mut(&task_id) {
+                task.watchdog_observations.push(format!(
+                    "[{}] Reconnected wait on PID {} failed: {}",
+                    Utc::now().format("%H:%M:%S"),
+                    child_pid,
+                    e
+                ));
+                Server::persist_task(task);
+            }
+        }
+        Err(e) => {
+            let mut store = tasks.write().await;
+            if let Some(task) = store.get_mut(&task_id) {
+                task.watchdog_observations.push(format!(
+                    "[{}] Reconnected wait task panicked for PID {}: {}",
+                    Utc::now().format("%H:%M:%S"),
+                    child_pid,
+                    e
+                ));
+                Server::persist_task(task);
+            }
+        }
+    }
+
+    let offset = {
+        let store = tasks.read().await;
+        store.get(&task_id).map(|task| task.log_offset).unwrap_or(0)
+    };
+    finalize_reconnected_task(tasks, task_id, log_path, String::new(), offset).await;
 }
 
 async fn tail_task_log(
@@ -1038,19 +1168,12 @@ async fn tail_task_log(
                     })
                     .unwrap_or(true)
             };
-            if terminal {
-                if offset >= log_file_len(&log_path) {
-                    if !partial.is_empty() {
-                        process_log_lines(
-                            &tasks,
-                            &task_id,
-                            &[std::mem::take(&mut partial)],
-                            offset,
-                        )
+            if terminal && offset >= log_file_len(&log_path) {
+                if !partial.is_empty() {
+                    process_log_lines(&tasks, &task_id, &[std::mem::take(&mut partial)], offset)
                         .await;
-                    }
-                    break;
                 }
+                break;
             }
         }
 
@@ -1360,11 +1483,17 @@ impl Server {
             let tasks_c = server.tasks.clone();
             server.runtime.spawn(tail_task_log(
                 tasks_c,
-                spec.task_id,
-                spec.log_path,
+                spec.task_id.clone(),
+                spec.log_path.clone(),
                 spec.offset,
                 Some(spec.child_pid),
-                true,
+                false,
+            ));
+            server.runtime.spawn(watch_reconnected_process_exit(
+                server.tasks.clone(),
+                spec.task_id,
+                spec.log_path,
+                spec.child_pid,
             ));
         }
 
