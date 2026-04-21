@@ -25,15 +25,21 @@ What CPC is not: it is not a replacement for Claude Desktop's native tooling, no
 
 ---
 
-## What's New in v1.4.3
+## What's New in v1.4.4
 
-**Reconnect orphaned tasks on restart.** Task subprocesses that survive a Claude Desktop restart are now reconnected to their persistent log files instead of silently stalling. Startup calls `reconnect_orphaned_tasks()` to scan `%LOCALAPPDATA%\manager-mcp\tasks\` for running processes.
+Three coordinated fixes closing gaps found in v1.4.3's live restart test:
+
+1. **Task state persistence on submit.** A lightweight `state.json` is written to `tasks/{task_id}/` immediately on submit. On restart, manager scans these files as the source of truth for in-flight tasks — surviving crashes between task creation and full task record persistence.
+
+2. **Result capture from orphaned children.** When a child process completed while old manager was dead, the new manager now parses `child.log` for per-backend completion markers (codex `turn.completed`, claude_code `result`) and extracts the real agent output instead of blindly marking the task `failed`.
+
+3. **Progress keepalive notifications.** Slow MCP tool calls (`task_submit`, `task_run_parallel`, etc.) now send periodic `notifications/progress` or `notifications/message` every 10 seconds, preventing Claude Desktop's 60-second watchdog from killing manager mid-operation.
+
+### Previous: v1.4.3 — Orphaned task reconnect
 
 ### Previous: v1.4.2 — Dashboard port stability
 
-### Previous: v1.4.1 — Path migration + dashboard polish
-
-See [CHANGELOG.md](CHANGELOG.md) for the full history (v1.0.0 through v1.4.1), or browse the [Releases page](https://github.com/josephwander-arch/manager/releases) for per-version binaries and notes.
+See [CHANGELOG.md](CHANGELOG.md) for the full history (v1.0.0 through v1.4.2), or browse the [Releases page](https://github.com/josephwander-arch/manager/releases) for per-version binaries and notes.
 
 ---
 
