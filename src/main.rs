@@ -1,5 +1,5 @@
 #![recursion_limit = "512"]
-//! Manager MCP Server v1.4.4
+//! Manager MCP Server v1.4.3
 //! Multi-AI orchestrator: GPT (reasoning), Gemini CLI (coding), Claude Code (coding)
 //! Submit → Poll → Retrieve pattern for long-running tasks
 //!
@@ -553,48 +553,6 @@ struct ReconnectSpec {
     child_pid: u32,
 }
 
-/// v1.4.4: Lightweight task metadata written to `tasks/{id}/state.json` on submit.
-/// Survives manager crashes — reconnect scans these as source of truth for in-flight tasks.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct TaskState {
-    task_id: String,
-    backend: String,
-    prompt_preview: String,
-    working_dir: Option<String>,
-    child_pid: Option<u32>,
-    started_at: Option<DateTime<Utc>>,
-    log_path: Option<String>,
-    created_at: DateTime<Utc>,
-}
-
-fn task_state_path(task_id: &str) -> std::path::PathBuf {
-    task_workspace_dir(task_id).join("state.json")
-}
-
-/// Write (or update) the lightweight state.json for a task.
-fn write_task_state(task: &Task) {
-    let state = TaskState {
-        task_id: task.id.clone(),
-        backend: task.backend.to_string(),
-        prompt_preview: safe_truncate(&task.prompt, 200),
-        working_dir: task.working_dir.clone(),
-        child_pid: task.child_pid,
-        started_at: task.started_at,
-        log_path: task.log_path.clone(),
-        created_at: task.created_at,
-    };
-    let dir = task_workspace_dir(&task.id);
-    let _ = std::fs::create_dir_all(&dir);
-    if let Ok(data) = serde_json::to_string_pretty(&state) {
-        let _ = std::fs::write(task_state_path(&task.id), data);
-    }
-}
-
-/// Remove state.json when a task reaches a terminal state (written to history instead).
-fn remove_task_state(task_id: &str) {
-    let _ = std::fs::remove_file(task_state_path(task_id));
-}
-
 fn task_workspace_dir(task_id: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(tasks_dir()).join(task_id)
 }
@@ -960,74 +918,6 @@ fn final_status_from_log(log_path: &str) -> Option<(TaskStatus, Option<String>)>
     None
 }
 
-/// v1.4.4: Extract the final agent output from a completed child log.
-/// Walks the log looking for per-backend result content so reconnected tasks
-/// get real output instead of an empty string.
-fn extract_output_from_log(log_path: &str, backend: &Backend) -> Option<String> {
-    let content = std::fs::read_to_string(log_path).ok()?;
-    let mut output_parts: Vec<String> = Vec::new();
-
-    match backend {
-        Backend::Codex => {
-            // Codex emits {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
-            // and {"type":"turn.completed"} at the end.
-            for line in content.lines() {
-                if let Ok(v) = serde_json::from_str::<Value>(line) {
-                    let ev_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    if ev_type == "item.completed" {
-                        if let Some(item) = v.get("item") {
-                            if item.get("type").and_then(|t| t.as_str()) == Some("agent_message") {
-                                if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                                    output_parts.push(text.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Backend::ClaudeCode => {
-            // Claude Code stream-json emits {"type":"result","result":"..."} at the end,
-            // and {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}} during.
-            for line in content.lines() {
-                if let Ok(v) = serde_json::from_str::<Value>(line) {
-                    let ev_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    if ev_type == "result" {
-                        if let Some(text) = v.get("result").and_then(|t| t.as_str()) {
-                            output_parts.push(text.to_string());
-                        }
-                    } else if ev_type == "assistant" {
-                        if let Some(contents) =
-                            v.pointer("/message/content").and_then(|c| c.as_array())
-                        {
-                            for item in contents {
-                                if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                    if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                                        output_parts.push(text.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Backend::Gemini => {
-            // TODO: Gemini CLI output format TBD — fall through to None for now.
-            // When Gemini CLI streaming format is documented, add marker detection here.
-        }
-        Backend::Gpt => {
-            // GPT tasks are in-process (API call), not applicable for log-based recovery.
-        }
-    }
-
-    if output_parts.is_empty() {
-        None
-    } else {
-        Some(output_parts.join("\n"))
-    }
-}
-
 fn log_tail_text(log_path: &str, max_chars: usize) -> String {
     let Ok(content) = std::fs::read_to_string(log_path) else {
         return String::new();
@@ -1121,12 +1011,6 @@ async fn finalize_reconnected_task(
                     let status_label = status.to_string();
                     task.status = status;
                     task.error = error;
-                    // v1.4.4: Extract real output from log
-                    if task.status == TaskStatus::Done && task.output.is_empty() {
-                        if let Some(extracted) = extract_output_from_log(&log_path, &task.backend) {
-                            task.output = extracted;
-                        }
-                    }
                     task.watchdog_observations.push(format!(
                         "[{}] Reconnected child exited; finalized from log marker as {}",
                         Utc::now().format("%H:%M:%S"),
@@ -1151,7 +1035,6 @@ async fn finalize_reconnected_task(
             Server::persist_task(task);
             Server::save_to_history(task);
             save_task_artifact(task);
-            remove_task_state(&task.id);
             check_and_fire_task_notify(task, &RealNotifier);
             auto_advance_loaf_on_task_complete(task);
             completed_snap = Some(task.clone());
@@ -1404,7 +1287,6 @@ impl Server {
         Server::persist_task(task);
         Server::save_to_history(task);
         save_task_artifact(task);
-        remove_task_state(&task.id);
     }
 
     fn reconnect_orphaned_tasks(
@@ -1494,19 +1376,6 @@ impl Server {
                         task.status = status;
                         task.error = error;
                         task.completed_at = Some(Utc::now());
-                        // v1.4.4: Extract real output from log when child completed successfully
-                        if task.status == TaskStatus::Done && task.output.is_empty() {
-                            if let Some(extracted) =
-                                extract_output_from_log(&log_path, &task.backend)
-                            {
-                                task.output = extracted;
-                                task.watchdog_observations.push(format!(
-                                    "[{}] Extracted {} chars of output from child.log",
-                                    Utc::now().format("%H:%M:%S"),
-                                    task.output.len()
-                                ));
-                            }
-                        }
                         task.watchdog_observations.push(format!(
                             "[{}] Child PID is dead; finalized from log marker as {}",
                             Utc::now().format("%H:%M:%S"),
@@ -1568,101 +1437,6 @@ impl Server {
                     if let Ok(data) = std::fs::read_to_string(entry.path()) {
                         if let Ok(task) = serde_json::from_str::<Task>(&data) {
                             tasks.insert(task.id.clone(), task);
-                        }
-                    }
-                }
-            }
-        }
-
-        // v1.4.4: Scan tasks/*/state.json for in-flight tasks not yet in flat JSON files.
-        // Covers the gap where task_submit wrote state.json but manager crashed before
-        // persist_task finished writing the flat {id}.json.
-        if let Ok(entries) = std::fs::read_dir(tasks_dir()) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let state_path = path.join("state.json");
-                    if state_path.exists() {
-                        if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
-                            if !tasks.contains_key(dir_name) {
-                                if let Ok(data) = std::fs::read_to_string(&state_path) {
-                                    if let Ok(state) = serde_json::from_str::<TaskState>(&data) {
-                                        info!(
-                                            "Recovered task {} from state.json (no flat JSON file)",
-                                            state.task_id
-                                        );
-                                        let backend = match state.backend.as_str() {
-                                            "gpt" => Backend::Gpt,
-                                            "gemini" => Backend::Gemini,
-                                            "codex" => Backend::Codex,
-                                            _ => Backend::ClaudeCode,
-                                        };
-                                        let task = Task {
-                                            id: state.task_id.clone(),
-                                            backend,
-                                            prompt: state.prompt_preview.clone(),
-                                            system_prompt: None,
-                                            model: None,
-                                            working_dir: state.working_dir.clone(),
-                                            status: TaskStatus::Running,
-                                            output: String::new(),
-                                            error: None,
-                                            created_at: state.created_at,
-                                            started_at: state.started_at,
-                                            completed_at: None,
-                                            progress_lines: 0,
-                                            steps: Vec::new(),
-                                            last_activity: None,
-                                            last_output_chunk_at: None,
-                                            stall_detected: false,
-                                            extraction_status: ExtractionStatus::None,
-                                            trust_score: 0,
-                                            trust_level: TrustLevel::Low,
-                                            rollback_path: None,
-                                            validation_status: ValidationStatus::NotChecked,
-                                            assertions: Vec::new(),
-                                            backed_up_files: Vec::new(),
-                                            retry_count: 0,
-                                            max_retries: 2,
-                                            retry_of: None,
-                                            error_context: None,
-                                            input_tokens: 0,
-                                            output_tokens: 0,
-                                            cost_usd: 0.0,
-                                            on_complete: None,
-                                            role: None,
-                                            save_artifact: false,
-                                            rerun_of: None,
-                                            parent_task_id: None,
-                                            forked_from: None,
-                                            continuation_of: None,
-                                            child_pid: state.child_pid,
-                                            log_path: state.log_path.clone(),
-                                            log_offset: 0,
-                                            reconnected: false,
-                                            watchdog_observations: vec![format!(
-                                                "[{}] Recovered from state.json only (flat JSON missing)",
-                                                Utc::now().format("%H:%M:%S")
-                                            )],
-                                            fingerprint: None,
-                                            superseded_by: None,
-                                            label: None,
-                                            current_step: None,
-                                            total_steps: None,
-                                            current_step_desc: None,
-                                            live_activity: None,
-                                            effort: None,
-                                            notify_on_complete: None,
-                                            notify_on_fail: None,
-                                            notify_on_destroy: None,
-                                            notify_title: None,
-                                            notify_body: None,
-                                        };
-                                        Server::persist_task(&task);
-                                        tasks.insert(task.id.clone(), task);
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -2841,7 +2615,6 @@ async fn run_gpt_task(
         Server::persist_task(task);
         Server::save_to_history(task);
         save_task_artifact(task);
-        remove_task_state(&task.id);
         // v1.3.1: task notify
         check_and_fire_task_notify(task, &RealNotifier);
         // v1.3.4: auto-advance loaf phase if task was linked to current phase
@@ -2911,7 +2684,6 @@ async fn run_codex_task(
             task.log_path = Some(log_path.clone());
             task.log_offset = 0;
             Server::persist_task(task);
-            write_task_state(task);
         }
     }
 
@@ -2952,7 +2724,6 @@ async fn run_codex_task(
         if let Some(task) = store.get_mut(&task_id) {
             task.child_pid = Some(pid);
             Server::persist_task(task);
-            write_task_state(task);
         }
         drop(store);
         tokio::spawn(tail_task_log(
@@ -3010,7 +2781,6 @@ async fn run_codex_task(
         Server::persist_task(task);
         Server::save_to_history(task);
         save_task_artifact(task);
-        remove_task_state(&task.id);
         // v1.3.1: task notify
         check_and_fire_task_notify(task, &RealNotifier);
         // v1.3.4: auto-advance loaf phase if task was linked to current phase
@@ -3094,7 +2864,6 @@ async fn run_cli_task(
             task.log_path = Some(log_path.clone());
             task.log_offset = 0;
             Server::persist_task(task);
-            write_task_state(task);
         }
     }
     let (stdout_stdio, stderr_stdio) = match open_child_log_stdio(&log_path) {
@@ -3173,7 +2942,6 @@ async fn run_cli_task(
         if let Some(task) = store.get_mut(&task_id) {
             task.child_pid = Some(pid);
             Server::persist_task(task);
-            write_task_state(task);
         }
         drop(store);
         tokio::spawn(tail_task_log(
@@ -3701,7 +3469,6 @@ async fn run_cli_task(
         Server::persist_task(task);
         Server::save_to_history(task);
         save_task_artifact(task);
-        remove_task_state(&task.id);
         // v1.3.1: task notify
         check_and_fire_task_notify(task, &RealNotifier);
         // v1.3.4: auto-advance loaf phase if task was linked to current phase
@@ -4050,8 +3817,6 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
         store.insert(task_id.clone(), task.clone());
     });
     Server::persist_task(&task);
-    // v1.4.4: Write lightweight state.json for reconnect discovery
-    write_task_state(&task);
 
     // Spawn background execution
     let tasks_bg = server.tasks.clone();
@@ -10435,70 +10200,8 @@ fn main() {
                     .to_string();
                 let tool_args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-                // v1.4.4: Progress keepalive for slow tool calls.
-                // Prevents Claude Desktop's 60-second watchdog from killing manager
-                // by sending periodic notifications while the handler is blocked.
-                let progress_token = params
-                    .get("_meta")
-                    .and_then(|m| m.get("progressToken"))
-                    .cloned();
-                let needs_progress = matches!(
-                    tool_name_s.as_str(),
-                    "task_submit"
-                        | "submit_task"
-                        | "task_run_parallel"
-                        | "run_workflow"
-                        | "session_start"
-                );
-                let progress_cancel = Arc::new(AtomicBool::new(false));
-                if needs_progress {
-                    let stdout_c = server.stdout.clone();
-                    let cancel_c = progress_cancel.clone();
-                    let token_c = progress_token;
-                    server.runtime.spawn(async move {
-                        let mut tick = 1u64;
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                            if cancel_c.load(Ordering::Relaxed) {
-                                break;
-                            }
-                            let notif = if let Some(ref token) = token_c {
-                                json!({
-                                    "jsonrpc": "2.0",
-                                    "method": "notifications/progress",
-                                    "params": {
-                                        "progressToken": token,
-                                        "progress": tick,
-                                        "total": 0
-                                    }
-                                })
-                            } else {
-                                json!({
-                                    "jsonrpc": "2.0",
-                                    "method": "notifications/message",
-                                    "params": {
-                                        "level": "info",
-                                        "logger": "manager",
-                                        "data": format!("Processing... ({}s elapsed)", tick * 10)
-                                    }
-                                })
-                            };
-                            if let Ok(mut out) = stdout_c.lock() {
-                                let _ = writeln!(
-                                    out,
-                                    "{}",
-                                    serde_json::to_string(&notif).unwrap_or_default()
-                                );
-                                let _ = out.flush();
-                            }
-                            tick += 1;
-                        }
-                    });
-                }
-
                 let tc_start = std::time::Instant::now();
                 let result = handle_tool_call(&server, &tool_name_s, tool_args);
-                progress_cancel.store(true, Ordering::Relaxed);
                 let tc_ms = tc_start.elapsed().as_millis() as u64;
                 {
                     let entry = ToolCallEntry {
@@ -12030,8 +11733,9 @@ mod tests {
                 status = TaskStatus::Orphaned;
             }
             // else: keep Running (non-session tasks retain status)
+        } else if child_pid.is_some() {
+            status = TaskStatus::Failed;
         } else {
-            // Dead child (with or without PID) → Failed
             status = TaskStatus::Failed;
         }
         status
@@ -12252,208 +11956,6 @@ mod tests {
         // Cleanup
         DASHBOARD_PORT.store(0, Ordering::SeqCst);
         DASHBOARD_RUNNING.store(false, Ordering::SeqCst);
-    }
-
-    // =========================================================================
-    // Tests — v1.4.4: TaskState serialization round-trip
-    // =========================================================================
-
-    #[test]
-    fn task_state_serialization_round_trip() {
-        let state = TaskState {
-            task_id: "abc12345".into(),
-            backend: "codex".into(),
-            prompt_preview: "Build a CLI tool that...".into(),
-            working_dir: Some(r"C:\projects\test".into()),
-            child_pid: Some(12345),
-            started_at: Some(Utc::now()),
-            log_path: Some(r"C:\temp\tasks\abc12345\child.log".into()),
-            created_at: Utc::now(),
-        };
-        let json_str = serde_json::to_string_pretty(&state).unwrap();
-        let deserialized: TaskState = serde_json::from_str(&json_str).unwrap();
-
-        assert_eq!(state.task_id, deserialized.task_id);
-        assert_eq!(state.backend, deserialized.backend);
-        assert_eq!(state.prompt_preview, deserialized.prompt_preview);
-        assert_eq!(state.working_dir, deserialized.working_dir);
-        assert_eq!(state.child_pid, deserialized.child_pid);
-        assert_eq!(state.log_path, deserialized.log_path);
-    }
-
-    #[test]
-    fn task_state_write_and_read_from_disk() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state_path = tmp.path().join("state.json");
-        let state = TaskState {
-            task_id: "disk_test".into(),
-            backend: "claude_code".into(),
-            prompt_preview: "Test prompt".into(),
-            working_dir: None,
-            child_pid: None,
-            started_at: None,
-            log_path: None,
-            created_at: Utc::now(),
-        };
-        let data = serde_json::to_string_pretty(&state).unwrap();
-        std::fs::write(&state_path, &data).unwrap();
-        let loaded: TaskState =
-            serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
-        assert_eq!(loaded.task_id, "disk_test");
-        assert_eq!(loaded.backend, "claude_code");
-    }
-
-    // =========================================================================
-    // Tests — v1.4.4: Log-tail parser (codex turn.completed, claude result)
-    // =========================================================================
-
-    #[test]
-    fn log_parser_finds_codex_turn_completed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let log = tmp.path().join("child.log");
-        let content = r#"{"type":"item.created","item":{"type":"agent_message"}}
-{"type":"item.completed","item":{"type":"agent_message","text":"Done: created 3 files"}}
-{"type":"turn.completed"}
-"#;
-        std::fs::write(&log, content).unwrap();
-        let result = final_status_from_log(log.to_str().unwrap());
-        assert!(result.is_some(), "must find turn.completed marker");
-        let (status, err) = result.unwrap();
-        assert_eq!(status, TaskStatus::Done);
-        assert!(err.is_none());
-    }
-
-    #[test]
-    fn log_parser_finds_claude_result() {
-        let tmp = tempfile::tempdir().unwrap();
-        let log = tmp.path().join("child.log");
-        let content = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working..."}]}}
-{"type":"result","subtype":"success","result":"All changes applied successfully.","is_error":false}
-"#;
-        std::fs::write(&log, content).unwrap();
-        let result = final_status_from_log(log.to_str().unwrap());
-        assert!(result.is_some(), "must find result marker");
-        let (status, err) = result.unwrap();
-        assert_eq!(status, TaskStatus::Done);
-        assert!(err.is_none());
-    }
-
-    #[test]
-    fn log_parser_truncated_log_returns_none() {
-        let tmp = tempfile::tempdir().unwrap();
-        let log = tmp.path().join("child.log");
-        // Partial log with no completion marker
-        let content = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"still working..."}]}}
-{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"xyz"}]}}
-some random stderr output
-"#;
-        std::fs::write(&log, content).unwrap();
-        let result = final_status_from_log(log.to_str().unwrap());
-        assert!(
-            result.is_none(),
-            "truncated log must return None, got: {:?}",
-            result
-        );
-    }
-
-    // =========================================================================
-    // Tests — v1.4.4: extract_output_from_log
-    // =========================================================================
-
-    #[test]
-    fn extract_output_codex_agent_message() {
-        let tmp = tempfile::tempdir().unwrap();
-        let log = tmp.path().join("child.log");
-        let content = r#"{"type":"item.completed","item":{"type":"agent_message","text":"Created files:\n- foo.rs\n- bar.rs"}}
-{"type":"item.completed","item":{"type":"mcp_tool_call","tool":"write"}}
-{"type":"item.completed","item":{"type":"agent_message","text":"All done."}}
-{"type":"turn.completed"}
-"#;
-        std::fs::write(&log, content).unwrap();
-        let output = extract_output_from_log(log.to_str().unwrap(), &Backend::Codex);
-        assert!(output.is_some(), "must extract output from codex log");
-        let text = output.unwrap();
-        assert!(
-            text.contains("Created files"),
-            "output must contain agent text"
-        );
-        assert!(text.contains("All done"), "output must contain final text");
-    }
-
-    #[test]
-    fn extract_output_claude_result() {
-        let tmp = tempfile::tempdir().unwrap();
-        let log = tmp.path().join("child.log");
-        let content = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Analyzing..."}]}}
-{"type":"result","subtype":"success","result":"Implemented all requested changes.","is_error":false}
-"#;
-        std::fs::write(&log, content).unwrap();
-        let output = extract_output_from_log(log.to_str().unwrap(), &Backend::ClaudeCode);
-        assert!(output.is_some(), "must extract output from claude log");
-        let text = output.unwrap();
-        assert!(
-            text.contains("Implemented all requested changes"),
-            "must contain result text"
-        );
-    }
-
-    #[test]
-    fn extract_output_gemini_returns_none() {
-        let tmp = tempfile::tempdir().unwrap();
-        let log = tmp.path().join("child.log");
-        std::fs::write(&log, "some gemini output\n").unwrap();
-        let output = extract_output_from_log(log.to_str().unwrap(), &Backend::Gemini);
-        assert!(
-            output.is_none(),
-            "gemini extraction is TBD — must return None"
-        );
-    }
-
-    // =========================================================================
-    // Tests — v1.4.4: Progress notification JSON format
-    // =========================================================================
-
-    #[test]
-    fn progress_notification_with_token_has_correct_shape() {
-        let token = json!("progress_abc123");
-        let notif = json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/progress",
-            "params": {
-                "progressToken": token,
-                "progress": 1,
-                "total": 0
-            }
-        });
-        assert_eq!(notif["method"].as_str().unwrap(), "notifications/progress");
-        assert_eq!(
-            notif["params"]["progressToken"].as_str().unwrap(),
-            "progress_abc123"
-        );
-        // Must NOT have an "id" field (notifications are fire-and-forget)
-        assert!(notif.get("id").is_none(), "notification must not have id");
-    }
-
-    #[test]
-    fn progress_notification_without_token_falls_back_to_message() {
-        let notif = json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/message",
-            "params": {
-                "level": "info",
-                "logger": "manager",
-                "data": "Processing... (10s elapsed)"
-            }
-        });
-        assert_eq!(notif["method"].as_str().unwrap(), "notifications/message");
-        assert!(
-            notif["params"]["data"]
-                .as_str()
-                .unwrap()
-                .contains("Processing"),
-            "message must contain status text"
-        );
-        assert!(notif.get("id").is_none(), "notification must not have id");
     }
 }
 

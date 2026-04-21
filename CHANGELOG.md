@@ -4,20 +4,6 @@ All notable changes to the Manager MCP Server are documented here.
 
 ## [Unreleased]
 
-## [1.4.4] - 2026-04-21
-
-### Added
-
-- **Task state persistence on submit** — On `task_submit`, a lightweight `state.json` is immediately written to `tasks/{task_id}/` with task metadata (backend, prompt preview, working_dir, child_pid, log_path, timestamps). On startup, manager scans `tasks/*/state.json` as an additional source of truth for in-flight tasks, closing the gap where a crash between `task_submit` and `persist_task` could lose the task record entirely. State files are cleaned up when tasks reach terminal status.
-
-- **Result capture from orphaned children on reconnect** — When a child process is dead on reconnect but its `child.log` ends with a clean completion marker, manager now extracts the actual agent output and promotes the task to `status: done` with real content. Per-backend markers: codex (`item.completed` with `agent_message` text, `turn.completed`), claude_code (`type: result` with result text, `assistant` message content). Gemini detection is stubbed with a TODO. Previously, completed tasks whose manager died mid-flight were always marked `failed` with empty output.
-
-- **Async progress notifications** — For MCP tool calls expected to take >5 seconds (`task_submit`, `task_run_parallel`, `run_workflow`, `session_start`), manager now sends `notifications/progress` (with `progressToken` if the client provided one) or `notifications/message` keepalives every 10 seconds. This prevents Claude Desktop's default 60-second watchdog from cancelling in-flight requests that block the handler thread.
-
-### Fixed
-
-- **Orphaned codex tasks falsely marked failed** — A codex task that completed successfully while old manager was dead would be marked `failed` because `reconnect_orphaned_tasks` found a dead PID without extracting the completion evidence from `child.log`. Now the log tail is parsed for per-backend completion markers and agent output before defaulting to `failed`.
-
 ## [1.4.3] - 2026-04-20
 
 ### Added
